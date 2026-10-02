@@ -61,16 +61,6 @@ Requirements:
 
 Uninstall: `./install.sh --uninstall`
 
-### Building the DMG
-
-```sh
-app/make-dmg.sh              # → dist/Perf Tool.dmg
-```
-
-The DMG records the git remote of this checkout (`git remote get-url origin`, or `--remote <url>`);
-the app installs the tool from there and checks it for updates. Without a remote it uses the copy
-inside the app and does not update itself.
-
 ## Run: one command
 
 From the project folder:
@@ -102,7 +92,7 @@ domains share one iOS boot splash (react-native-bootsplash), `perf` runs the dom
 script on a copy of the project, puts the result into the built `.app` and signs it again with
 the same certificate.
 
-**Signing team (iOS device):** in this order: `--team <ID>` → `PERF_TEAM` →
+**Signing team (installing your app on an iPhone):** the Apple team that signs the probe build of your app, in this order: `--team <ID>` → `PERF_TEAM` →
 `PERF_TEAM_<DOMAIN>` → the Team ID from the setup page → a local provisioning profile for the
 bundle id.
 
