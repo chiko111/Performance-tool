@@ -20,7 +20,7 @@ in git.
 
 ### With the app (recommended)
 
-1. Open **Perf Tool.dmg** and drag **Perf Tool** to Applications.
+1. Download **Perf-Tool.dmg** from [Releases](https://github.com/chiko111/Performance-tool/releases/latest), open it and drag **Perf Tool** to Applications.
 2. Start it. The app has no window: it installs perf-tool in
    `~/Library/Application Support/perf-tool` and opens the **setup page** in the browser
    (http://localhost:8098).
