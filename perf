@@ -1,0 +1,412 @@
+#!/usr/bin/env bash
+# Live performance tooling for React Native release builds. Lives outside the project:
+# a probe build is assembled from this folder on request and leaves the project untouched.
+#
+# Run from inside the project (or set PERF_REPO=/path/to/project). The project's settings come
+# from the setup page (perf init / the Perf Tool app), saved in ~/.config/perf-tool/projects.json.
+#   perf init                            Setup page: scan the project, fill in or fix the settings
+#   perf ios ["<device or simulator>"] [--variant <name>] [--team ID]
+#                                        Server + Release build with probe + install + dashboard
+#                                        (no device name: the one connected iPhone)
+#   perf android [serial] [--variant <name>]
+#                                        Server + Android release with probe + install + dashboard
+#   perf setup [--remove]                Add (or remove) the yarn perf:* scripts in package.json
+#   perf devices                         List iOS devices/simulators and Android devices
+#   perf server [android]                Only the live dashboard (http://localhost:8099)
+#   perf compiler [path-filter] [--all]  React Compiler status per component
+#   perf ios-trace <label> "<device>" [seconds]   Instruments recording + summary
+#   perf ios-compare <before.json> <after.json>
+#   perf update                          Update perf-tool from its git repository
+#   perf clean                           Remove generated files and probe build caches
+#
+# --variant picks a domain / brand of a multi-domain project (--brand is the same); without it
+# the default one is built. Add --no-server to `perf ios|android` to only build and install.
+set -euo pipefail
+
+TOOL="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# The Perf Tool app links its built-in Node here; otherwise the system Node runs the tool.
+if [[ -x "$TOOL/runtime/node" ]]; then NODE="$TOOL/runtime/node"; else NODE="$(command -v node || echo node)"; fi
+REPO="${PERF_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+NAME="$(basename "$REPO")"
+GEN="$TOOL/.generated/$NAME"
+CACHE="$HOME/Library/Caches/perf-tool/$NAME"
+RESULTS_DIR="$HOME/perf-results"
+PORT=8099
+DASHBOARD="http://localhost:$PORT"
+SERVER_PID=""
+TAIL_PID=""
+
+usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'; }
+fail() { echo "perf: $*" >&2; exit 1; }
+
+require() {
+  [[ -x "$NODE" ]] || command -v "$NODE" >/dev/null 2>&1 || fail "Node.js is required (or install the Perf Tool app, which has it built in)"
+  for tool in "$@"; do
+    command -v "$tool" >/dev/null 2>&1 || fail "'$tool' is required but not installed (see README)"
+  done
+}
+
+check_project() {
+  [[ -f "$REPO/package.json" ]] || fail "run perf from the project folder (no package.json in $REPO), or set PERF_REPO"
+  [[ -d "$REPO/node_modules" ]] || fail "node_modules missing in $REPO — run 'yarn install' (or npm install) first"
+}
+
+# Settings of the chosen variant (config.mjs): IOS_*, ANDROID_*, ENV_FILE, ENV_KIND, CONFIG_TEAM...
+# A project seen for the first time is scanned and saved; perf init shows and edits the result.
+load_variant() {
+  check_project
+  if ! "$NODE" "$TOOL/lib/config.mjs" has --repo "$REPO"; then
+    echo "First run for $REPO: scanning the project (perf init shows and edits the result)…"
+    "$NODE" "$TOOL/lib/init.mjs" --repo "$REPO" --auto || fail "the scan could not set up the project — run 'perf init' and fill in the missing fields"
+  fi
+  local assignments
+  assignments="$("$NODE" "$TOOL/lib/config.mjs" shell --repo "$REPO" ${VARIANT:+--variant "$VARIANT"})" || exit 1
+  eval "$assignments"
+  if [[ -n "$ENV_FILE" ]]; then
+    [[ -f "$ENV_FILE" ]] || fail "env file of '$VARIANT' not found: $ENV_FILE (perf init to change it)"
+    echo "Variant $VARIANT: bundling $(basename "$ENV_FILE")"
+    # react-native-config reads its file at build time, in Xcode and Gradle.
+    if [[ "$ENV_KIND" == react-native-config ]]; then export ENVFILE="$ENV_FILE"; fi
+  fi
+}
+
+# Once a day: a short git fetch tells whether perf-tool has a newer version.
+check_for_update() {
+  [[ -d "$TOOL/.git" ]] || return 0
+  local stamp="$HOME/Library/Caches/perf-tool/update-check"
+  [[ -f "$stamp" && -z "$(find "$stamp" -mmin +1440 2>/dev/null)" ]] && return 0
+  mkdir -p "$(dirname "$stamp")" && touch "$stamp"
+  GIT_TERMINAL_PROMPT=0 perl -e 'alarm 5; exec @ARGV' git -C "$TOOL" fetch --quiet origin 2>/dev/null || return 0
+  local behind
+  behind="$(git -C "$TOOL" rev-list --count 'HEAD..@{u}' 2>/dev/null || echo 0)"
+  [[ "$behind" -gt 0 ]] && echo "perf-tool: $behind update(s) available — run 'perf update'" >&2
+  return 0
+}
+
+list_devices() {
+  echo "iOS devices:"
+  xcrun xctrace list devices 2>/dev/null | sed -n '/== Devices ==/,/== Devices Offline ==/p' |
+    grep -E '^.+ \([0-9.]+\) \(' | sed -E 's/ \(([0-9.]+)\) \(.*$/   (iOS \1)/; s/^/  /' || true
+  echo "iOS simulators:"
+  xcrun simctl list devices available | grep -E '^[[:space:]]+(iPhone|iPad)' | sed -E 's/ \([0-9A-F-]{36}\)//; s/^[[:space:]]+/  /' || true
+  if command -v adb >/dev/null 2>&1; then
+    echo "Android devices:"
+    adb devices -l | tail -n +2 | grep -v '^$' | sed 's/^/  /' || true
+  fi
+}
+
+# Sets KIND (device|simulator) and UDID for a device or simulator name.
+# Names of iPhones/iPads connected by cable (paired Wi-Fi devices are listed but not picked).
+connected_ios_devices() {
+  local json
+  json="$(mktemp)"
+  xcrun devicectl list devices --json-output "$json" >/dev/null 2>&1 || true
+  "$NODE" -e 'try {
+    // mktemp gives no .json extension, so require() would parse the file as JavaScript.
+    for (const device of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).result.devices)
+      if (device.connectionProperties?.transportType === "wired") console.log(device.deviceProperties.name);
+  } catch {}' "$json"
+  rm -f "$json"
+}
+
+resolve_ios_target() {
+  local name="$1"
+  if [[ -z "$name" ]]; then
+    local devices
+    devices="$(connected_ios_devices)"
+    if [[ -n "$devices" && "$(wc -l <<<"$devices")" -eq 1 ]]; then
+      name="$devices"
+      DEVICE_NAME="$name"
+      echo "Using the connected device: $name"
+    else
+      echo "No single iPhone connected by cable — pass the device or simulator name, e.g. perf ios \"iPhone 16 plus\"" >&2
+      list_devices
+      exit 1
+    fi
+  fi
+  UDID="$(xcrun xctrace list devices 2>/dev/null | sed -n '/== Devices ==/,/== Devices Offline ==/p' |
+    grep -F "$name (" | head -1 | grep -oE '\([0-9A-Fa-f-]{20,}\)$' | tr -d '()' || true)"
+  if [[ -n "$UDID" ]]; then KIND=device; return; fi
+  UDID="$(xcrun simctl list devices available | grep -F "    $name (" | sort -r -t'(' -k3 | grep -m1 -oE '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' || true)"
+  if [[ -n "$UDID" ]]; then KIND=simulator; return; fi
+  echo "No connected device or simulator named '$name'." >&2
+  list_devices
+  exit 1
+}
+
+server_running() { curl -sf "$DASHBOARD/ping" >/dev/null 2>&1; }
+
+# Team for device signing: --team / PERF_TEAM / PERF_TEAM_<VARIANT>, the team saved on the setup
+# page, else the team of a local provisioning profile for the bundle id (the project may leave
+# DEVELOPMENT_TEAM empty and rely on each developer's Xcode).
+resolve_team() {
+  [[ -n "${PERF_TEAM:-}" ]] && { TEAM="$PERF_TEAM"; return; }
+  local variant_team
+  variant_team="PERF_TEAM_$(tr '[:lower:]' '[:upper:]' <<<"$VARIANT" | tr -c 'A-Z0-9\n' '_')"
+  [[ -n "${!variant_team:-}" ]] && { TEAM="${!variant_team}"; return; }
+  [[ -n "${CONFIG_TEAM:-}" ]] && { TEAM="$CONFIG_TEAM"; return; }
+  TEAM=""
+  local profile plist
+  plist="$(mktemp)"
+  for profile in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/"*.mobileprovision \
+    "$HOME/Library/MobileDevice/Provisioning Profiles/"*.mobileprovision; do
+    [[ -f "$profile" ]] || continue
+    security cms -D -i "$profile" >"$plist" 2>/dev/null || continue
+    if [[ "$(plutil -extract Entitlements.application-identifier raw -o - "$plist" 2>/dev/null)" == *".$IOS_BUNDLE" ]]; then
+      TEAM="$(plutil -extract TeamIdentifier.0 raw -o - "$plist" 2>/dev/null)"
+      break
+    fi
+  done
+  rm -f "$plist"
+}
+
+# Starts the dashboard server in the background unless one is already running for this setup.
+start_server() {
+  local android_package="${1:-}"
+  if server_running; then
+    local running_android
+    running_android="$(curl -sf "$DASHBOARD/status" | sed -nE 's/.*"android":"([^"]+)".*/\1/p')"
+    if [[ -z "$android_package" || "$running_android" == "$android_package" ]]; then
+      echo "Dashboard already running: $DASHBOARD"
+      return
+    fi
+    if curl -sf -X POST "$DASHBOARD/android" -H 'Content-Type: application/json' \
+      -d "{\"package\":\"$android_package\"}" >/dev/null 2>&1; then
+      echo "Dashboard already running: $DASHBOARD (Android sampling switched on for $android_package)"
+      return
+    fi
+    # An older perf-tool server without that endpoint: stop it (it saves an active recording) and restart.
+    local old_pids
+    old_pids="$(pgrep -f "$TOOL/lib/server.mjs" || true)"
+    [[ -n "$old_pids" ]] || fail "port $PORT is used by another program — free it and retry"
+    echo "Restarting the dashboard server with Android sampling…"
+    kill -TERM $old_pids 2>/dev/null || true
+    for _ in $(seq 1 20); do server_running || break; sleep 0.25; done
+  fi
+  mkdir -p "$CACHE"
+  local args=(--repo "$REPO")
+  [[ -n "$android_package" ]] && args+=(--android "$android_package")
+  "$NODE" "$TOOL/lib/server.mjs" "${args[@]}" >"$CACHE/server.log" 2>&1 &
+  SERVER_PID=$!
+  echo "$SERVER_PID" >"$CACHE/server.pid"
+  for _ in $(seq 1 20); do server_running && break; sleep 0.25; done
+  server_running || { cat "$CACHE/server.log" >&2; fail "dashboard server did not start"; }
+  echo "Dashboard: $DASHBOARD"
+  open "$DASHBOARD"
+  # While this session's server runs, the yarn perf:* scripts are available in package.json.
+  "$NODE" "$TOOL/lib/setup.mjs" --repo "$REPO" --quiet || true
+}
+
+# The scripts stay only when the project has committed them; otherwise package.json goes back clean.
+remove_scripts() {
+  git -C "$REPO" show HEAD:package.json 2>/dev/null | grep -qE '"perf:(ios|android)' && return
+  "$NODE" "$TOOL/lib/setup.mjs" --repo "$REPO" --remove --quiet || true
+}
+
+stop_server() {
+  [[ -n "${TAIL_PID:-}" ]] && kill "$TAIL_PID" 2>/dev/null || true
+  if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
+    kill -TERM "$SERVER_PID" 2>/dev/null || true # the server saves an active recording first
+    wait "$SERVER_PID" 2>/dev/null || true
+    rm -f "$CACHE/server.pid"
+  fi
+  [[ -n "$SERVER_PID" ]] && remove_scripts
+}
+
+# Keeps the dashboard alive in the foreground until Ctrl-C.
+follow_server() {
+  [[ -n "$SERVER_PID" ]] || return 0
+  echo
+  echo "Live data: $DASHBOARD   (Ctrl-C stops the server; an active recording is saved)"
+  tail -n +1 -f "$CACHE/server.log" &
+  local tail_pid=$!
+  TAIL_PID=$tail_pid
+  wait "$SERVER_PID" 2>/dev/null || true
+  kill "$tail_pid" 2>/dev/null || true
+}
+
+# Saves the build output to $2 and shows its progress in the terminal and on the dashboard.
+build_progress() {
+  "$NODE" "$TOOL/lib/build-progress.mjs" --platform "$1" --log "$2" --history "$CACHE/build-history.json" \
+    ${SERVER_PID:+--dashboard "$DASHBOARD"}
+}
+
+build_ios() {
+  local sdk=$([[ "$KIND" == simulator ]] && echo iphonesimulator || echo iphoneos)
+  [[ ! -f "$REPO/ios/Podfile" || -d "$REPO/ios/Pods" ]] || fail "ios/Pods missing — run 'cd ios && pod install' first"
+  "$NODE" "$TOOL/lib/prepare.mjs" --repo "$REPO" --out "$GEN" --ios-sdk "$sdk" ${ENV_FILE:+--env-file "$ENV_FILE"}
+  mkdir -p "$CACHE"
+  local signing=()
+  if [[ "$KIND" == device ]]; then
+    resolve_team
+    if [[ -n "$TEAM" ]]; then
+      signing=("DEVELOPMENT_TEAM=$TEAM")
+      echo "Signing with team $TEAM"
+    fi
+  fi
+  [[ -n "$IOS_SCHEME" && -n "$IOS_BUNDLE" ]] || fail "variant '$VARIANT' has no iOS settings — perf init to add them"
+  local container=(-workspace "$IOS_WORKSPACE")
+  [[ "$IOS_WORKSPACE" == *.xcodeproj ]] && container=(-project "$IOS_WORKSPACE")
+  echo "Building Release + probe → $DEVICE_NAME ($KIND, $VARIANT, scheme '$IOS_SCHEME'). Log: $CACHE/ios-build.log"
+  # Separate DerivedData: probe builds never invalidate or replace the normal build cache.
+  BUNDLE_CONFIG="$GEN/metro.config.js" ENTRY_FILE="$GEN/bundle/index.perf.js" \
+    xcodebuild "${container[@]}" -scheme "$IOS_SCHEME" -configuration Release \
+    -destination "id=$UDID" -derivedDataPath "$CACHE/ios" -xcconfig "$GEN/perf.xcconfig" \
+    -allowProvisioningUpdates "${signing[@]+"${signing[@]}"}" build 2>&1 | build_progress ios "$CACHE/ios-build.log" || true
+  if ! grep -q "BUILD SUCCEEDED" "$CACHE/ios-build.log"; then
+    grep -q "requires a development team" "$CACHE/ios-build.log" &&
+      echo "No signing team found for $IOS_BUNDLE. Pass it: perf ios \"$DEVICE_NAME\" --team <TEAM_ID> (Xcode → Settings → Accounts)." >&2
+    grep -q "doesn't include the currently selected device" "$CACHE/ios-build.log" &&
+      echo "This device ($UDID) is not registered in the ${TEAM:-team}'s profile for $IOS_BUNDLE. Sign in to that team in Xcode → Settings → Accounts so Xcode can register it, ask a team admin to add the UDID, or use a registered device." >&2
+    grep -q "No Accounts" "$CACHE/ios-build.log" &&
+      echo "Xcode has no Apple ID signed in (Xcode → Settings → Accounts); without it new devices cannot be added to profiles." >&2
+    fail "build failed, see $CACHE/ios-build.log"
+  fi
+
+  local app="" candidate
+  for candidate in "$CACHE/ios/Build/Products/Release-$sdk/"*.app; do
+    if [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$candidate/Info.plist" 2>/dev/null)" == "$IOS_BUNDLE" ]]; then app="$candidate"; fi
+  done
+  [[ -n "$app" ]] || fail "built app for $IOS_BUNDLE not found"
+  # Projects whose domains share one boot splash: this domain's splash goes into the built app.
+  if [[ -n "$IOS_SPLASH_SCRIPT" ]]; then
+    PERF_NODE="$NODE" "$TOOL/lib/ios-splash.sh" "$REPO" "$IOS_SPLASH_SCRIPT" "$app" \
+      "$(/usr/libexec/PlistBuddy -c 'Print MinimumOSVersion' "$app/Info.plist")" || fail "could not switch the boot splash ($IOS_SPLASH_SCRIPT)"
+  fi
+  if [[ "$KIND" == simulator ]]; then
+    xcrun simctl boot "$UDID" 2>/dev/null || true
+    open -a Simulator
+    xcrun simctl install "$UDID" "$app"
+    xcrun simctl launch --terminate-running-process "$UDID" "$IOS_BUNDLE" >/dev/null
+  else
+    xcrun devicectl device install app --device "$UDID" "$app" >/dev/null
+    xcrun devicectl device process launch --device "$UDID" --terminate-existing "$IOS_BUNDLE" >/dev/null
+  fi
+  echo "Probe build installed and launched on $DEVICE_NAME."
+  # Lets the dashboard's automatic before/after runs drive this device.
+  if server_running; then
+    "$NODE" -e 'console.log(JSON.stringify({ udid: process.argv[1], kind: process.argv[2], bundle: process.argv[3], team: process.argv[4], name: process.argv[5] }))' \
+      "$UDID" "$KIND" "$IOS_BUNDLE" "${TEAM:-}" "$DEVICE_NAME" |
+      curl -sf -X POST "$DASHBOARD/ios" -H 'Content-Type: application/json' -d @- >/dev/null || true
+  fi
+}
+
+build_android() {
+  "$NODE" "$TOOL/lib/prepare.mjs" --repo "$REPO" --out "$GEN" ${ENV_FILE:+--env-file "$ENV_FILE"}
+  [[ -n "$ANDROID_PACKAGE" ]] || fail "variant '$VARIANT' has no Android settings — perf init to add them"
+  echo "Building Android release + probe ($VARIANT, ${ANDROID_FLAVOR:+$ANDROID_FLAVOR }Release). Log: $CACHE/android-build.log"
+  mkdir -p "$CACHE"
+  (cd "$REPO/android" && ./gradlew -I "$GEN/init.gradle" --console=rich "install${ANDROID_FLAVOR}Release" 2>&1) |
+    build_progress android "$CACHE/android-build.log" || fail "build failed, see $CACHE/android-build.log"
+  adb shell monkey -p "$ANDROID_PACKAGE" -c android.intent.category.LAUNCHER 1 >/dev/null
+  echo "Probe build installed and launched. The next normal release build re-bundles without the probe."
+}
+
+command="${1:-help}"
+shift || true
+with_server=1
+positional=()
+expect_team=0
+expect_variant=0
+VARIANT=""
+for arg in "$@"; do
+  if [[ $expect_team == 1 ]]; then PERF_TEAM="$arg"; expect_team=0
+  elif [[ $expect_variant == 1 ]]; then VARIANT="$arg"; expect_variant=0
+  elif [[ "$arg" == "--team" ]]; then expect_team=1
+  elif [[ "$arg" == "--variant" || "$arg" == "--brand" ]]; then expect_variant=1
+  elif [[ "$arg" == "--no-server" ]]; then with_server=0
+  else positional+=("$arg"); fi
+done
+set -- "${positional[@]+"${positional[@]}"}"
+
+case "$command" in
+  ios)
+    require xcrun xcodebuild
+    check_for_update
+    load_variant
+    DEVICE_NAME="${1:-}"
+    resolve_ios_target "$DEVICE_NAME"
+    trap stop_server EXIT
+    trap 'exit 130' INT TERM
+    [[ $with_server == 1 ]] && start_server
+    build_ios
+    follow_server
+    ;;
+
+  android)
+    require adb
+    check_for_update
+    load_variant
+    [[ -n "${1:-}" ]] && export ANDROID_SERIAL="$1" # adb, Gradle install and the server honour it
+    adb get-state >/dev/null 2>&1 || fail "no Android device connected (or several: pass the serial, see 'perf devices')"
+    trap stop_server EXIT
+    trap 'exit 130' INT TERM
+    [[ $with_server == 1 ]] && start_server "$ANDROID_PACKAGE"
+    build_android
+    follow_server
+    ;;
+
+  devices)
+    list_devices
+    ;;
+
+  init)
+    require
+    exec "$NODE" "$TOOL/lib/init.mjs" --repo "$REPO" "$@"
+    ;;
+
+  update)
+    [[ -d "$TOOL/.git" ]] || fail "$TOOL is not a git clone; reinstall it from the Perf Tool app or git"
+    git -C "$TOOL" pull --ff-only
+    ;;
+
+  setup)
+    require
+    check_project
+    exec "$NODE" "$TOOL/lib/setup.mjs" --repo "$REPO" "$@"
+    ;;
+
+  server)
+    require
+    check_project
+    if [[ "${1:-}" == "android" ]]; then
+      load_variant
+      exec "$NODE" "$TOOL/lib/server.mjs" --repo "$REPO" --android "$ANDROID_PACKAGE"
+    fi
+    exec "$NODE" "$TOOL/lib/server.mjs" --repo "$REPO"
+    ;;
+
+  compiler)
+    require
+    check_project
+    exec "$NODE" "$TOOL/lib/compiler-report.mjs" --repo "$REPO" "$@"
+    ;;
+
+  ios-trace)
+    require xcrun
+    load_variant
+    label="${1:?label required, e.g. perf ios-trace home-before \"iPhone 16 plus\"}"
+    resolve_ios_target "${2:-}"
+    seconds="${3:-60}"
+    mkdir -p "$RESULTS_DIR/ios-traces"
+    output="$RESULTS_DIR/ios-traces/$(date +%Y-%m-%d_%H-%M-%S)_${label}.trace"
+    echo "Recording ${seconds}s. Use the app now; Ctrl-C stops early."
+    xcrun xctrace record --template 'Time Profiler' --instrument 'Hitches' \
+      --device "$UDID" --time-limit "${seconds}s" --output "$output" --launch -- "$IOS_BUNDLE" || true
+    "$NODE" "$TOOL/lib/ios-analyze.mjs" "$output" --process "${IOS_EXECUTABLE:-$IOS_SCHEME}"
+    open "$output"
+    ;;
+
+  ios-compare)
+    exec "$NODE" "$TOOL/lib/ios-analyze.mjs" --compare "$@"
+    ;;
+
+  clean)
+    rm -rf "$GEN" "$CACHE"
+    echo "Removed $GEN and $CACHE"
+    ;;
+
+  *)
+    usage
+    ;;
+esac

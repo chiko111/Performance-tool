@@ -1,0 +1,921 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Live Perf</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #5d6573; --border: #dfe3ea;
+    --good: #1a7f37; --warn: #9a6700; --bad: #cf222e; --accent: #0b62d6;
+    --s1: #0b62d6; --s2: #d4580b; --s3: #1a7f37; --s4: #8250df; --s5: #bf3989; --s6: #57606a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1116; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #2a313c;
+      --good: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #4493f8;
+      --s1: #4493f8; --s2: #f0883e; --s3: #3fb950; --s4: #a371f7; --s5: #db61a2; --s6: #8d96a0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 15px; margin: 0 8px 0 0; }
+  .status { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; }
+  .dot.on { background: var(--good); }
+  .screen { font-weight: 600; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px; }
+  .spacer { flex: 1; }
+  input, select, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 5px 9px; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+  button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  nav { display: flex; gap: 4px; padding: 8px 16px 0; }
+  nav button { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+  nav button[aria-selected="true"] { background: var(--panel); border-bottom-color: var(--panel); font-weight: 600; }
+  main { padding: 0 16px 24px; }
+  .tab { display: none; } .tab.active { display: block; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: 8px; margin: 12px 0; }
+  .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+  .kpi .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+  .kpi .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .kpi .value.good { color: var(--good); } .kpi .value.warn { color: var(--warn); } .kpi .value.bad { color: var(--bad); }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .grid > .wide { grid-column: 1 / -1; }
+  /* The five live charts share one row; they wrap only on narrow windows. */
+  .grid.charts { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+  .grid.charts .panel { padding: 8px 10px; }
+  .build { display: flex; gap: 12px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  .build progress { flex: 0 0 240px; height: 10px; }
+  .build .step { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .build.failed strong { color: var(--bad); } .build.done strong { color: var(--good); }
+  @media (max-width: 620px) { .build progress { flex-basis: 120px; } }
+  .toast { position: fixed; right: 16px; bottom: 16px; z-index: 5; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; min-width: 0; }
+  .panel h2 { font-size: 13px; margin: 0 0 6px; display: flex; gap: 8px; align-items: center; }
+  .panel h2 .hint { color: var(--muted); font-weight: 400; }
+  canvas { width: 100%; height: 120px; display: block; }
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .legend i { display: inline-block; width: 10px; height: 3px; margin-right: 4px; vertical-align: middle; }
+  .table-wrap { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+  /* Tables keep their natural width and scroll sideways inside the panel instead of truncating. */
+  table { width: max-content; min-width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 600; font-size: 11px; }
+  td.num, th.num { text-align: right; }
+  td.file { color: var(--muted); }
+  /* First column stays visible while scrolling horizontally. */
+  th:first-child, td:first-child { position: sticky; left: 0; background: var(--panel); z-index: 1; }
+  th:first-child { z-index: 2; }
+  .up { color: var(--bad); } .down { color: var(--good); }
+  .empty { color: var(--muted); padding: 12px 0; }
+  .muted { color: var(--muted); }
+  .help { margin-top: 12px; } .help summary { cursor: pointer; font-weight: 600; } .help li { margin: 4px 0; }
+  .steps { margin: 12px 0; padding-left: 20px; } .steps li { margin: 4px 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+  @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } .grid.charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 620px) { .grid.charts { grid-template-columns: 1fr; } }
+  @media (max-width: 520px) { header h1 { width: 100%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Live Perf</h1>
+  <span class="status"><span class="dot" id="jsDot"></span>JS probe</span>
+  <span class="status"><span class="dot" id="nativeDot"></span><span id="nativeLabel">Native</span></span>
+  <span class="status">Platform: <strong id="platform">–</strong></span>
+  <span class="status">Screen: <span class="screen" id="screen">–</span></span>
+  <label class="status" for="source">Device</label>
+  <select id="source" title="Each running app is a separate source; charts, tables and recordings use only the selected one"><option value="">waiting…</option></select>
+  <span class="spacer"></span>
+  <label class="status" for="label">Label</label>
+  <input id="label" placeholder="home-before" size="16" />
+  <button class="primary" id="record">● Record</button>
+  <button class="danger" id="stop" hidden>■ Stop <span id="elapsed"></span></button>
+</header>
+
+<div class="build" id="build" role="status" aria-live="polite" hidden>
+  <strong id="buildTitle"></strong>
+  <progress id="buildBar" max="100"></progress>
+  <span class="step" id="buildStep"></span>
+</div>
+
+<nav role="tablist">
+  <button role="tab" aria-selected="true" data-tab="live">Live</button>
+  <button role="tab" aria-selected="false" data-tab="recordings">Recordings &amp; compare</button>
+  <button role="tab" aria-selected="false" data-tab="auto">Auto before / after</button>
+</nav>
+
+<main>
+  <section class="tab active" id="tab-live">
+    <div class="kpis" id="kpis"></div>
+    <div class="grid charts">
+      <div class="panel"><h2>Temperature <span class="hint" id="tempHint">°C (Android) · thermal state (iOS)</span></h2><canvas id="chartTemp"></canvas><div class="legend" id="legendTemp"></div></div>
+      <div class="panel"><h2>Frames per second <span class="hint">JS vs UI thread</span></h2><canvas id="chartFps"></canvas><div class="legend" id="legendFps"></div></div>
+      <div class="panel"><h2>CPU by thread <span class="hint">% of one core</span></h2><canvas id="chartThreads"></canvas><div class="legend" id="legendThreads"></div></div>
+      <div class="panel"><h2>JS thread load <span class="hint">ms per second</span></h2><canvas id="chartJs"></canvas><div class="legend" id="legendJs"></div></div>
+      <div class="panel"><h2>Garbage collection &amp; memory</h2><canvas id="chartGc"></canvas><div class="legend" id="legendGc"></div></div>
+    </div>
+    <div class="row">
+      <label class="status" for="windowSize">Aggregate over</label>
+      <select id="windowSize">
+        <option value="10">last 10 s</option>
+        <option value="30" selected>last 30 s</option>
+        <option value="120">last 2 min</option>
+        <option value="600">last 10 min</option>
+      </select>
+      <label class="status"><input type="checkbox" id="currentScreenOnly" /> current screen only</label>
+      <span class="spacer"></span>
+      <button id="copyLive" title="Summary of the selected window as Markdown, for a ticket or for analysis">Copy as text</button>
+      <button id="downloadLive">Download .md</button>
+      <button id="clearLive" title="Clears the live charts and tables; saved recordings are kept">Clear live data</button>
+    </div>
+    <div class="grid">
+      <div class="panel"><h2>Components <span class="hint">self render time</span></h2><div class="table-wrap" id="componentsTable"></div></div>
+      <div class="panel"><h2>Files <span class="hint">self render time</span></h2><div class="table-wrap" id="filesTable"></div></div>
+      <div class="panel"><h2>Threads <span class="hint">avg % of one core</span></h2><div class="table-wrap" id="threadsTable"></div></div>
+      <div class="panel"><h2>Slow commits <span class="hint">&ge; 16 ms</span></h2><div class="table-wrap" id="commitsTable"></div></div>
+      <div class="panel"><h2>Network <span class="hint">requests per endpoint · duplicate = same endpoint in flight or &lt; 1 s ago</span></h2><div class="table-wrap" id="networkTable"></div></div>
+      <div class="panel"><h2>Redux <span class="hint">state slices that changed · renders in the commit right after</span></h2><div class="muted" id="reduxTotals"></div><div class="table-wrap" id="reduxTable"></div></div>
+      <div class="panel wide"><h2>Not memoized by React Compiler <span class="hint">rendered in this window</span></h2><div class="table-wrap" id="compilerTable"></div></div>
+    </div>
+    <details class="panel help">
+      <summary>How to read the numbers</summary>
+      <ul>
+        <li><b>Long task</b>: the JS thread was busy for at least 50 ms without a break (same threshold as the web Long Tasks API). While that happens, taps, scroll callbacks, timers, network responses and JS-driven animations wait. <b>Max JS block</b> is the longest such freeze. Aim for 0 long tasks while scrolling.</li>
+        <li><b>Render ms/s</b>: time React spent rendering components per second. <b>Components / Files</b> show self time, without children. Time of library components (View, Text, SvgXml…) is charged to the closest component of ours that renders them; <b>Incl. library</b> shows which ones.</li>
+        <li><b>Why</b>: what changed for the component compared with its previous render — <i>props: name</i>, <i>state</i>, <i>store (useSelector)</i>, <i>context: Provider</i>. <b>parent rendered (props equal)</b> means nothing it receives changed: it re-rendered only because its parent did and it is not memoized.</li>
+        <li><b>Compiler ✓ memo</b>: React Compiler memoized the component; at runtime the probe saw useMemoCache on it. <b>✗ error/class/skipped</b>: not memoized, and the reason comes from the compiler itself. Many renders with no prop changes and ✗ is the first thing to fix.</li>
+        <li><b>JS FPS / UI FPS</b>: frames the JS / main thread delivered. On Android the UI value is the number of frames actually drawn (0 when idle is normal).</li>
+        <li><b>Hermes GC</b>: garbage-collector CPU time and heap of the JS engine. <b>ART GC</b> (Android): Java/Kotlin garbage collector. A rising heap that never drops means a leak.</li>
+        <li>The probe build uses React's profiling renderer, so absolute numbers are a little higher than in the store build. Compare <i>probe build vs probe build</i> (before/after).</li>
+      </ul>
+    </details>
+  </section>
+
+  <section class="tab" id="tab-recordings">
+    <p class="muted">Before and After can each be a saved recording or the <b>live data</b> of the selected device, so live data can be compared with any recording.</p>
+    <div class="row">
+      <label class="status" for="recA">Before</label><select id="recA"></select>
+      <label class="status" for="recB">After</label><select id="recB"></select>
+      <button class="primary" id="compare">Compare</button>
+      <button id="refresh">Refresh list</button>
+      <button class="danger" id="clearAll" title="Deletes every saved recording and the auto before/after runs; scenarios are kept">Master clear</button>
+    </div>
+    <div class="row">
+      <span class="status">Before:</span>
+      <button id="openA">Open</button>
+      <button id="copyA">Copy as text</button>
+      <button id="downloadA">Download .md</button>
+      <button class="danger" id="deleteA">Delete</button>
+    </div>
+    <div class="row">
+      <span class="status">After:</span>
+      <button id="openB">Open</button>
+      <button id="copyB">Copy as text</button>
+      <button id="downloadB">Download .md</button>
+      <button class="danger" id="deleteB">Delete</button>
+    </div>
+    <div class="row">
+      <span class="status">Comparison:</span>
+      <button id="copyCompare">Copy as text</button>
+      <button id="downloadCompare">Download .md</button>
+      <span class="spacer"></span>
+      <span class="status">Live data (selected device):</span>
+      <button id="copyLiveRec">Copy as text</button>
+      <button id="downloadLiveRec">Download .md</button>
+    </div>
+    <div id="report"></div>
+  </section>
+
+  <section class="tab" id="tab-auto">
+    <ol class="muted steps">
+      <li>Open the app on the screen to test (for example Home), pick the platform and press <b>● Start auto</b>. Use the app, then press <b>■ Stop</b>.
+        Your gestures are saved as a scenario and replayed right away on this build ×<i>Runs</i>: that is <b>Before</b>.</li>
+      <li>Make the change and rebuild (<code>perf android</code> / <code>perf ios</code>, the dashboard keeps running), then press <b>▶ Replay</b>:
+        the app restarts, opens the same screen by itself and replays the scenario ×<i>Runs</i> (<b>After</b>). The comparison appears below, ready for <b>Copy as text</b>.</li>
+      <li>Do not touch the phone while it replays. The first iOS replay builds a small runner (about a minute).</li>
+    </ol>
+    <div class="row">
+      <label class="status" for="capturePlatform">Platform</label>
+      <select id="capturePlatform"><option value="android">Android</option><option value="ios">iOS</option></select>
+      <span class="status">App is on: <span class="screen" id="autoScreen">–</span></span>
+      <label class="status" for="scenarioName">Name</label>
+      <input id="scenarioName" placeholder="home" size="12" />
+      <label class="status" for="runs">Runs</label>
+      <select id="runs"><option>1</option><option>2</option><option selected>3</option><option>5</option></select>
+      <button class="primary" id="captureStart">● Start auto</button>
+      <button class="danger" id="captureStop" hidden>■ Stop</button>
+    </div>
+    <div class="row">
+      <label class="status" for="scenario">Scenario</label>
+      <select id="scenario"></select>
+      <button class="primary" id="runAfter">▶ Replay (after)</button>
+      <button id="runBefore" title="Replays the scenario on the current build as the new before set">↻ Re-run before</button>
+      <button class="danger" id="autoCancel" hidden>Cancel</button>
+    </div>
+    <div class="row"><span class="status" id="autoStatus" role="status" aria-live="polite">–</span></div>
+    <div class="row">
+      <span class="status" id="autoSession"></span>
+      <span class="spacer"></span>
+      <button id="autoCompare">Compare</button>
+      <button class="primary" id="copyAuto">Copy as text</button>
+      <button id="downloadAuto">Download .md</button>
+    </div>
+    <div id="autoReport"></div>
+  </section>
+</main>
+
+<script>
+const HISTORY = 120;
+const state = { js: [], native: [], recording: null, recordingSince: 0, sources: new Map(), source: '', sourcePinned: false };
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const palette = () => ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6'].map(css);
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const fmt = (value, digits = 0) => value == null || Number.isNaN(value) ? '–' : Number(value).toFixed(digits);
+
+// Only the selected device is shown; an unpinned selection follows the most recently active app.
+function trackSource(event) {
+  if (!event.source) return;
+  const isNew = !state.sources.has(event.source);
+  state.sources.set(event.source, event.receivedAt);
+  const current = state.sources.get(state.source) ?? 0;
+  if (!state.source || (!state.sourcePinned && event.receivedAt - current > 5000)) state.source = event.source;
+  if (isNew || $('source').value !== state.source) renderSources();
+}
+
+function renderSources() {
+  const now = Date.now();
+  $('source').innerHTML = [...state.sources.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([source, seen]) => `<option value="${escapeHtml(source)}">${escapeHtml(source)}${now - seen > 10000 ? ' (idle)' : ''}</option>`)
+    .join('');
+  $('source').value = state.source;
+}
+
+$('source').onchange = () => {
+  state.source = $('source').value;
+  state.sourcePinned = true;
+  scheduleRender();
+};
+
+const viewEvents = events => events.filter(event => !event.source || !state.source || event.source === state.source);
+
+function addEvent(event) {
+  trackSource(event);
+  if (event.type === 'js') { state.js.push(event); if (state.js.length > 600) state.js.shift(); }
+  if (event.type === 'native') { state.native.push(event); if (state.native.length > 600) state.native.shift(); }
+}
+
+// The build `perf` is running; a finished one stays visible for a while.
+let buildHideTimer = null;
+function renderBuild(build) {
+  const panel = $('build');
+  clearTimeout(buildHideTimer);
+  if (!build) { panel.hidden = true; return; }
+  const clock = seconds => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+  const running = build.state === 'running';
+  panel.hidden = false;
+  panel.className = `build ${build.state}`;
+  $('buildTitle').textContent = running
+    ? `Building ${build.platform}${build.percent == null ? '' : ` ${build.percent}%`}`
+    : build.state === 'done' ? `${build.platform} build done` : `${build.platform} build failed`;
+  const bar = $('buildBar');
+  if (build.percent == null) bar.removeAttribute('value'); else bar.value = build.percent;
+  $('buildStep').textContent = running
+    ? `${clock(build.seconds)} · ${build.percent == null ? `${build.tasks} tasks (first build: no estimate yet) · ` : ''}${build.step}`
+    : `in ${clock(build.seconds)}`;
+  if (build.state === 'done') buildHideTimer = setTimeout(() => { panel.hidden = true; }, 20000);
+}
+
+const source = new EventSource('/events');
+source.onmessage = message => {
+  const event = JSON.parse(message.data);
+  if (event.type === 'clear') {
+    state.js = []; state.native = []; state.sources.clear(); state.source = ''; state.sourcePinned = false; renderSources();
+  } else if (event.type === 'auto') {
+    renderAuto(event.auto);
+    return;
+  } else if (event.type === 'build') {
+    renderBuild(event.build);
+    return;
+  } else if (event.type === 'hello') {
+    renderBuild(event.build);
+    event.history.forEach(addEvent);
+    setRecording(event.recording);
+  } else {
+    addEvent(event);
+  }
+  scheduleRender();
+};
+
+let renderQueued = false;
+function scheduleRender() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; renderLive(); });
+}
+setInterval(scheduleRender, 1000);
+
+function drawChart(canvas, series, { max, unit = '' } = {}) {
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  canvas.width = width * ratio; canvas.height = height * ratio;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(ratio, ratio);
+  ctx.clearRect(0, 0, width, height);
+  const left = 34, bottom = 16, top = 6;
+  const plotH = height - bottom - top, plotW = width - left - 4;
+  const peak = max ?? Math.max(1, ...series.flatMap(s => s.values.filter(v => v != null)));
+  const niceMax = max ?? Math.ceil(peak * 1.1);
+  ctx.strokeStyle = css('--border'); ctx.fillStyle = css('--muted'); ctx.font = '10px sans-serif'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = top + plotH - (plotH * i) / 4;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(width - 4, y); ctx.stroke();
+    ctx.fillText(fmt((niceMax * i) / 4) + unit, 0, y + 3);
+  }
+  ctx.fillText(`-${HISTORY}s`, left, height - 3);
+  ctx.fillText('now', width - 26, height - 3);
+  series.forEach(s => {
+    ctx.strokeStyle = s.color; ctx.lineWidth = 1.6; ctx.beginPath();
+    let started = false;
+    s.values.forEach((value, index) => {
+      if (value == null) { started = false; return; }
+      const x = left + (plotW * index) / (HISTORY - 1);
+      const y = top + plotH - (plotH * Math.min(value, niceMax)) / niceMax;
+      started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      started = true;
+    });
+    ctx.stroke();
+  });
+}
+
+function legend(element, series) {
+  element.innerHTML = series.map(s => `<span><i style="background:${s.color}"></i>${escapeHtml(s.label)}</span>`).join('');
+}
+
+// When the sample was taken: the device clock, unless it is clearly out of sync with the Mac.
+const sampleTime = event => (event.t && Math.abs(event.t - event.receivedAt) < 30000 ? event.t : event.receivedAt);
+
+// One value per second for the last HISTORY seconds, aligned to "now". Samples that land in the
+// same second (timer jitter, a batch sent after a reconnect) are averaged, not summed.
+function perSecond(events, pick) {
+  const now = Date.now();
+  const sums = new Array(HISTORY).fill(0);
+  const counts = new Array(HISTORY).fill(0);
+  for (const event of events) {
+    const age = Math.floor((now - sampleTime(event)) / 1000);
+    if (age < 0 || age >= HISTORY) continue;
+    const value = pick(event);
+    if (value == null) continue;
+    sums[HISTORY - 1 - age] += value;
+    counts[HISTORY - 1 - age] += 1;
+  }
+  return sums.map((sum, index) => (counts[index] ? sum / counts[index] : null));
+}
+
+function recent(events, seconds) {
+  const cutoff = Date.now() - seconds * 1000;
+  return events.filter(event => event.receivedAt >= cutoff);
+}
+
+const ANDROID_THERMAL = ['none', 'light', 'moderate', 'severe', 'critical', 'emergency', 'shutdown'];
+const IOS_THERMAL = ['nominal', 'fair', 'serious', 'critical'];
+const thermalLabel = event => {
+  const thermal = event?.thermal;
+  if (!thermal) return null;
+  return event.platform === 'ios' ? IOS_THERMAL[thermal.state] ?? '–' : ANDROID_THERMAL[thermal.status] ?? '–';
+};
+
+function kpi(label, value, level) {
+  return `<div class="kpi"><div class="label">${label}</div><div class="value ${level ?? ''}">${value}</div></div>`;
+}
+
+function level(value, goodBelow, badAbove, invert = false) {
+  if (value == null) return '';
+  if (invert) return value >= goodBelow ? 'good' : value <= badAbove ? 'bad' : 'warn';
+  return value <= goodBelow ? 'good' : value >= badAbove ? 'bad' : 'warn';
+}
+
+function average(values) {
+  const list = values.filter(v => v != null);
+  return list.length ? list.reduce((a, b) => a + b, 0) / list.length : null;
+}
+
+function renderLive() {
+  const liveJs = viewEvents(state.js), liveNative = viewEvents(state.native);
+  const now = Date.now();
+  const lastJs = liveJs.at(-1), lastNative = liveNative.at(-1);
+  $('jsDot').classList.toggle('on', !!lastJs && now - lastJs.receivedAt < 4000);
+  $('nativeDot').classList.toggle('on', !!lastNative && now - lastNative.receivedAt < 4000);
+  $('platform').textContent = (lastJs ?? lastNative)?.platform ?? '–';
+  $('nativeLabel').textContent = lastNative?.platform === 'android' ? 'adb sampler' : 'Native probe';
+  $('screen').textContent = lastJs?.screen ?? '–';
+  if (state.recording) $('elapsed').textContent = `${Math.round((now - state.recordingSince) / 1000)}s`;
+
+  const js5 = recent(liveJs, 5), native5 = recent(liveNative, 5), js10 = recent(liveJs, 10), native10 = recent(liveNative, 10);
+  const jsFps = average(js5.map(e => e.jsFps));
+  const uiFps = average(native5.map(e => e.ui?.fps));
+  const maxFps = lastNative?.ui?.maxFps ?? 60;
+  const cpu = average(native5.map(e => e.cpuMs / 10));
+  const gcMs = average(js5.map(e => e.hermes?.gcCpuMs));
+  const heap = lastJs?.hermes?.heapMb;
+  const memory = [...liveNative].reverse().find(e => e.memoryMb != null)?.memoryMb;
+  const longTasks = js10.reduce((sum, e) => sum + e.longTasks, 0);
+  const drops = native10.reduce((sum, e) => sum + (e.ui?.hitches ?? e.ui?.janky ?? 0), 0);
+  const maxBlock = Math.max(0, ...js10.map(e => e.maxBlockMs));
+  const renderMs = average(js5.map(e => e.commitMs));
+  $('kpis').innerHTML = [
+    kpi('JS FPS', fmt(jsFps), level(jsFps, 55, 40, true)),
+    kpi('UI FPS', lastNative?.platform === 'android' ? fmt(uiFps) + '<small> frames</small>' : fmt(uiFps), lastNative?.platform === 'android' ? '' : level(uiFps, maxFps * 0.9, maxFps * 0.6, true)),
+    kpi('App CPU', fmt(cpu) + '%', level(cpu, 60, 150)),
+    kpi('Render ms/s', fmt(renderMs, 1), level(renderMs, 50, 200)),
+    kpi('Long tasks 10s', longTasks, level(longTasks, 0, 5)),
+    kpi('Max JS block', fmt(maxBlock) + 'ms', level(maxBlock, 50, 200)),
+    kpi('UI drops 10s', drops, level(drops, 2, 15)),
+    kpi('Hermes GC ms/s', fmt(gcMs, 1), level(gcMs, 10, 50)),
+    kpi('Hermes heap', fmt(heap, 1) + 'MB'),
+    kpi('Memory', fmt(memory) + 'MB'),
+    (() => {
+      const last = [...liveNative].reverse().find(e => e.thermal);
+      if (!last) return kpi('Temperature', '–');
+      const level = last.thermal.status ?? last.thermal.state ?? 0;
+      const tone = level >= (last.platform === 'ios' ? 2 : 3) ? 'bad' : level >= 1 ? 'warn' : '';
+      const degrees = last.thermal.cpuC ?? last.thermal.batteryC;
+      return kpi('Temperature', `${degrees != null ? fmt(degrees, 1) + '°C' : escapeHtml(thermalLabel(last))}`, tone);
+    })()
+  ].join('');
+
+  const colors = palette();
+  const fpsSeries = [
+    { label: 'JS FPS', color: colors[0], values: perSecond(liveJs, e => e.jsFps) },
+    { label: lastNative?.platform === 'android' ? 'UI frames rendered' : 'UI FPS', color: colors[1], values: perSecond(liveNative, e => e.ui?.fps) }
+  ];
+  drawChart($('chartFps'), fpsSeries); legend($('legendFps'), fpsSeries);
+
+  const threadTotals = new Map();
+  for (const event of recent(liveNative, HISTORY)) for (const t of event.threads ?? []) threadTotals.set(t.name, (threadTotals.get(t.name) ?? 0) + t.cpuMs);
+  const topThreads = [...threadTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name]) => name);
+  const threadSeries = topThreads.map((name, index) => ({
+    label: name, color: colors[index], values: perSecond(liveNative, e => (e.threads?.find(t => t.name === name)?.cpuMs ?? 0) / 10)
+  }));
+  drawChart($('chartThreads'), threadSeries, { unit: '%' }); legend($('legendThreads'), threadSeries);
+
+  const jsSeries = [
+    { label: 'React render ms', color: colors[0], values: perSecond(liveJs, e => e.commitMs) },
+    { label: 'Long task ms', color: colors[1], values: perSecond(liveJs, e => e.longTaskMs) },
+    { label: 'Max block ms', color: colors[4], values: perSecond(liveJs, e => e.maxBlockMs) }
+  ];
+  drawChart($('chartJs'), jsSeries); legend($('legendJs'), jsSeries);
+
+  const gcSeries = [
+    { label: 'Hermes GC ms', color: colors[2], values: perSecond(liveJs, e => e.hermes?.gcCpuMs) },
+    { label: 'Hermes heap MB', color: colors[3], values: perSecond(liveJs, e => e.hermes?.heapMb) },
+    { label: 'Hermes alloc MB/s', color: colors[0], values: perSecond(liveJs, e => e.hermes?.allocatedMb) }
+  ];
+  if (lastNative?.platform === 'android') gcSeries.push({ label: 'ART GC ms', color: colors[1], values: perSecond(liveNative, e => e.gc?.artTotalMs) });
+  drawChart($('chartGc'), gcSeries); legend($('legendGc'), gcSeries);
+
+  const isIos = lastNative?.platform === 'ios';
+  const tempSeries = isIos
+    ? [{ label: 'Thermal state (0 nominal … 3 critical)', color: colors[1], values: perSecond(liveNative, e => e.thermal?.state) }]
+    : [
+        { label: 'CPU °C', color: colors[1], values: perSecond(liveNative, e => e.thermal?.cpuC) },
+        { label: 'Skin °C', color: colors[4], values: perSecond(liveNative, e => e.thermal?.skinC) },
+        { label: 'Battery °C', color: colors[0], values: perSecond(liveNative, e => e.thermal?.batteryC) }
+      ];
+  drawChart($('chartTemp'), tempSeries, isIos ? { max: 3 } : {}); legend($('legendTemp'), tempSeries);
+  const lastThermal = [...liveNative].reverse().find(e => e.thermal);
+  $('tempHint').textContent = lastThermal
+    ? `throttling: ${thermalLabel(lastThermal)}${isIos ? ' · iOS has no °C' : ''}`
+    : '°C (Android) · thermal state (iOS)';
+
+  renderTables();
+}
+
+function table(columns, rows, emptyText) {
+  if (!rows.length) return `<div class="empty">${emptyText}</div>`;
+  return `<table><thead><tr>${columns.map(c => `<th class="${c.num ? 'num' : ''}">${c.label}</th>`).join('')}</tr></thead><tbody>${
+    rows.map(row => `<tr>${columns.map(c => `<td class="${c.num ? 'num' : ''} ${c.cls ?? ''}" title="${escapeHtml(row[c.key])}">${c.render ? c.render(row) : escapeHtml(row[c.key])}</td>`).join('')}</tr>`).join('')
+  }</tbody></table>`;
+}
+
+function libraryList(library) {
+  return escapeHtml(Object.entries(library ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, value]) => `${name} ${fmt(value, 1)}`).join(' · '));
+}
+
+function reasonList(reasons) {
+  return escapeHtml(Object.entries(reasons ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([reason, count]) => `${reason} ×${count}`).join(' · ')) || '<span class="muted">–</span>';
+}
+const NETWORK_COLUMNS = seconds => [
+  { label: 'Endpoint', key: 'key', cls: 'file' }, { label: 'Requests', key: 'count', num: true },
+  { label: 'per s', key: 'perSec', num: true, render: r => fmt(r.perSec ?? r.count / seconds, 2) },
+  { label: 'avg ms', key: 'avgMs', num: true, render: r => fmt(r.avgMs ?? r.ms / Math.max(1, r.count)) },
+  { label: 'max ms', key: 'maxMs', num: true }, { label: 'KB', key: 'kb', num: true, render: r => fmt(r.kb, 1) },
+  { label: 'Duplicates', key: 'duplicates', num: true, render: r => r.duplicates ? `<span class="up">${r.duplicates}</span>` : '0' },
+  { label: 'Errors', key: 'errors', num: true, render: r => r.errors ? `<span class="up">${r.errors}</span>` : '0' }
+];
+const SLICE_COLUMNS = seconds => [
+  { label: 'Slice', key: 'slice' }, { label: 'Updates', key: 'updates', num: true },
+  { label: 'per s', key: 'perSec', num: true, render: r => fmt(r.perSec ?? r.updates / seconds, 2) },
+  { label: 'Renders after', key: 'renders', num: true, render: r => fmt(r.renders) },
+  { label: 'Renders/s', key: 'rendersPerSec', num: true, render: r => fmt(r.rendersPerSec ?? r.renders / seconds, 1) }
+];
+
+function compilerBadge(compiler) {
+  if (!compiler) return '<span class="muted">–</span>';
+  if (compiler.status === 'compiled') return `<span class="down" title="${compiler.source === 'runtime' ? 'useMemoCache seen at runtime' : (compiler.memoSlots ?? '') + ' memo slots'}">✓ memo</span>`;
+  return `<span class="up" title="${escapeHtml((compiler.reasons ?? []).join('\n'))}">✗ ${escapeHtml(compiler.status)}</span>`;
+}
+
+function renderTables() {
+  const liveJs = viewEvents(state.js), liveNative = viewEvents(state.native);
+  const seconds = Number($('windowSize').value);
+  const onlyScreen = $('currentScreenOnly').checked ? liveJs.at(-1)?.screen : null;
+  const js = recent(liveJs, seconds).filter(e => !onlyScreen || e.screen === onlyScreen);
+  const components = new Map(), files = new Map();
+  for (const event of js) for (const c of event.components) {
+    const key = c.screen + '|' + c.component;
+    const row = components.get(key) ?? { screen: c.screen, component: c.component, file: c.file ?? '(library / RN)', ms: 0, renders: 0, mounts: 0, compiler: null, library: {}, reasons: {} };
+    for (const [reason, count] of Object.entries(c.reasons ?? {})) row.reasons[reason] = (row.reasons[reason] ?? 0) + count;
+    if (c.compiler && row.compiler?.source !== 'runtime') row.compiler = c.compiler;
+    for (const [name, value] of Object.entries(c.library ?? {})) row.library[name] = (row.library[name] ?? 0) + value;
+    row.ms += c.selfMs; row.renders += c.renders; row.mounts += c.mounts; components.set(key, row);
+    const fileKey = c.file ?? `(library) ${c.component}`;
+    const f = files.get(fileKey) ?? { file: fileKey, ms: 0, renders: 0 };
+    f.ms += c.selfMs; f.renders += c.renders; files.set(fileKey, f);
+  }
+  const ms = row => fmt(row.ms, 1);
+  $('componentsTable').innerHTML = table([
+    { label: 'Component', key: 'component' }, { label: 'Screen', key: 'screen' },
+    { label: 'ms', key: 'ms', num: true, render: ms }, { label: 'Renders', key: 'renders', num: true }, { label: 'Mounts', key: 'mounts', num: true },
+    { label: 'Compiler', key: 'compiler', render: r => compilerBadge(r.compiler) },
+    { label: 'Why', key: 'reasons', cls: 'file', render: r => reasonList(r.reasons) },
+    { label: 'Incl. library', key: 'library', cls: 'file', render: r => libraryList(r.library) },
+    { label: 'File', key: 'file', cls: 'file' }
+  ], [...components.values()].sort((a, b) => b.ms - a.ms).slice(0, 40), 'Waiting for the probe… open a screen in the app.');
+
+  const network = new Map();
+  const redux = { dispatches: 0, noops: 0, slices: new Map() };
+  for (const event of js) {
+    for (const n of event.network ?? []) {
+      const row = network.get(n.key) ?? { key: n.key, count: 0, ms: 0, maxMs: 0, kb: 0, duplicates: 0, errors: 0 };
+      row.count += n.count; row.ms += n.ms; row.maxMs = Math.max(row.maxMs, n.maxMs); row.kb += n.bytes / 1024; row.duplicates += n.duplicates; row.errors += n.errors;
+      network.set(n.key, row);
+    }
+    if (!event.redux) continue;
+    redux.dispatches += event.redux.dispatches; redux.noops += event.redux.noops;
+    for (const [slice, count] of Object.entries(event.redux.slices ?? {})) {
+      const row = redux.slices.get(slice) ?? { slice, updates: 0, renders: 0 }; row.updates += count; redux.slices.set(slice, row);
+    }
+    for (const sr of event.redux.sliceRenders ?? []) {
+      const row = redux.slices.get(sr.slice) ?? { slice: sr.slice, updates: 0, renders: 0 }; row.renders += sr.renders; redux.slices.set(sr.slice, row);
+    }
+  }
+  const windowSeconds = Math.max(1, js.length);
+  $('networkTable').innerHTML = table(NETWORK_COLUMNS(windowSeconds), [...network.values()].sort((a, b) => b.count - a.count).slice(0, 30), 'No requests in this window (or a probe build from an older perf-tool).');
+  $('reduxTotals').textContent = js.some(e => e.redux)
+    ? `${fmt(redux.dispatches / windowSeconds, 1)} dispatches/s · ${fmt(redux.noops / windowSeconds, 1)}/s changed nothing`
+    : 'No Redux data (store not found yet, or a probe build from an older perf-tool).';
+  $('reduxTable').innerHTML = table(SLICE_COLUMNS(windowSeconds), [...redux.slices.values()].sort((a, b) => b.renders - a.renders || b.updates - a.updates).slice(0, 30), 'No state changes in this window.');
+  $('compilerTable').innerHTML = table([
+    { label: 'Component', key: 'component' }, { label: 'ms', key: 'ms', num: true, render: ms }, { label: 'Renders', key: 'renders', num: true },
+    { label: 'Why not memoized', key: 'compiler', cls: 'file', render: r => escapeHtml((r.compiler.reasons ?? []).join(' · ') || r.compiler.status) },
+    { label: 'File', key: 'file', cls: 'file', render: r => escapeHtml(`${r.file}${r.compiler.line ? ':' + r.compiler.line : ''}`) }
+  ], [...components.values()].filter(r => r.compiler && r.compiler.status !== 'compiled').sort((a, b) => b.ms - a.ms).slice(0, 40),
+  'Every rendered component from our sources is memoized by React Compiler.');
+  $('filesTable').innerHTML = table([
+    { label: 'File', key: 'file', cls: 'file' }, { label: 'ms', key: 'ms', num: true, render: ms }, { label: 'Renders', key: 'renders', num: true }
+  ], [...files.values()].sort((a, b) => b.ms - a.ms).slice(0, 40), 'No renders in this window.');
+
+  const native = recent(liveNative, Math.min(seconds, 30));
+  const threads = new Map();
+  for (const event of native) for (const t of event.threads ?? []) threads.set(t.name, (threads.get(t.name) ?? 0) + t.cpuMs);
+  $('threadsTable').innerHTML = table([
+    { label: 'Thread', key: 'name' }, { label: 'avg %', key: 'pct', num: true, render: r => fmt(r.pct) }
+  ], [...threads.entries()].map(([name, total]) => ({ name, pct: total / Math.max(1, native.length) / 10 })).sort((a, b) => b.pct - a.pct).slice(0, 30),
+  'No native samples yet (iOS: native probe, Android: run the server with --android).');
+
+  const commits = js.flatMap(e => (e.slowCommits ?? []).map(c => ({ ...c, screen: e.screen, at: new Date(e.receivedAt).toLocaleTimeString() }))).reverse().slice(0, 30);
+  $('commitsTable').innerHTML = table([
+    { label: 'Time', key: 'at' }, { label: 'Screen', key: 'screen' }, { label: 'ms', key: 'ms', num: true },
+    { label: 'Top components', key: 'top', render: r => escapeHtml(r.top.map(t => `${t.component} ${fmt(t.ms, 1)}`).join(', ')) }
+  ], commits, 'No commits over 16 ms. 👍');
+}
+$('windowSize').onchange = renderTables;
+$('currentScreenOnly').onchange = renderTables;
+
+function setRecording(info) {
+  state.recording = info;
+  state.recordingSince = info?.startedAt ?? 0;
+  $('record').hidden = !!info; $('stop').hidden = !info; $('label').disabled = !!info;
+}
+$('record').onclick = async () => {
+  const label = $('label').value.trim() || 'session';
+  const response = await fetch('/record/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label, source: state.source }) });
+  setRecording(await response.json());
+};
+$('stop').onclick = async () => {
+  $('stop').disabled = true;
+  const summary = await (await fetch('/record/stop', { method: 'POST' })).json();
+  $('stop').disabled = false; setRecording(null);
+  await loadRecordings();
+  if (summary?.meta) { selectTab('recordings'); $('recB').value = summary.meta.id; renderSummary(summary); }
+};
+
+function selectTab(name) {
+  document.querySelectorAll('nav button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === `tab-${name}`));
+  if (name === 'live') scheduleRender();
+}
+document.querySelectorAll('nav button').forEach(b => (b.onclick = () => selectTab(b.dataset.tab)));
+
+const LIVE_WINDOWS = [30, 120, 600];
+const isLive = id => String(id).startsWith('live:');
+// Live summaries are computed for the device selected in the header.
+const withSource = url => (state.source ? `${url}&source=${encodeURIComponent(state.source)}` : url);
+
+async function loadRecordings() {
+  const list = await (await fetch('/recordings')).json();
+  const keepA = $('recA').value, keepB = $('recB').value;
+  const live = LIVE_WINDOWS.map(seconds => `<option value="live:${seconds}">● Live data — last ${seconds < 60 ? seconds + ' s' : seconds / 60 + ' min'}</option>`).join('');
+  const saved = list.map(r => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.id)} · ${escapeHtml(r.platform)} · ${r.durationSec}s</option>`).join('');
+  const options = `<optgroup label="Live">${live}</optgroup><optgroup label="Recordings">${saved}</optgroup>`;
+  $('recA').innerHTML = options; $('recB').innerHTML = options;
+  const ids = new Set(list.map(r => r.id));
+  const valid = value => value && (value.startsWith('live:') || ids.has(value));
+  $('recA').value = valid(keepA) ? keepA : list[1]?.id ?? list[0]?.id ?? 'live:120';
+  $('recB').value = valid(keepB) ? keepB : list[0]?.id ?? 'live:120';
+}
+$('refresh').onclick = loadRecordings;
+
+function toast(message) {
+  const element = document.createElement('div');
+  element.className = 'toast'; element.setAttribute('role', 'status'); element.textContent = message;
+  document.body.appendChild(element);
+  setTimeout(() => element.remove(), 2500);
+}
+
+async function copyText(url) {
+  const response = await fetch(url);
+  const text = await response.text();
+  if (!response.ok) return toast(`Export failed: ${text}`);
+  await navigator.clipboard.writeText(text);
+  toast(`Copied ${text.length.toLocaleString()} characters — paste them into the chat`);
+}
+
+function download(url) {
+  const link = document.createElement('a');
+  link.href = url + (url.includes('?') ? '&' : '?') + 'download=1';
+  link.click();
+}
+
+const liveUrl = () => withSource(`/export/live?seconds=${$('windowSize').value}`);
+const recordingUrl = id => withSource(`/export?id=${encodeURIComponent(id)}`);
+const compareUrl = () => withSource(`/export/compare?a=${encodeURIComponent($('recA').value)}&b=${encodeURIComponent($('recB').value)}`);
+$('copyLive').onclick = () => copyText(liveUrl());
+$('downloadLive').onclick = () => download(liveUrl());
+$('copyLiveRec').onclick = () => copyText(liveUrl());
+$('downloadLiveRec').onclick = () => download(liveUrl());
+$('copyA').onclick = () => copyText(recordingUrl($('recA').value));
+$('downloadA').onclick = () => download(recordingUrl($('recA').value));
+$('copyB').onclick = () => copyText(recordingUrl($('recB').value));
+$('downloadB').onclick = () => download(recordingUrl($('recB').value));
+$('copyCompare').onclick = () => copyText(compareUrl());
+$('downloadCompare').onclick = () => download(compareUrl());
+
+$('clearLive').onclick = async () => {
+  if (!confirm('Clear the live charts and tables? Saved recordings are kept.')) return;
+  await fetch('/live/clear', { method: 'POST' });
+  state.js = []; state.native = []; scheduleRender();
+};
+
+async function deleteRecording(id) {
+  if (isLive(id)) return toast('Live data is not a saved recording — use “Clear live data” on the Live tab');
+  if (!id || !confirm(`Delete recording ${id}? This cannot be undone.`)) return;
+  const response = await fetch(`/recordings/delete?id=${encodeURIComponent(id)}`, { method: 'POST' });
+  if (!response.ok) return toast((await response.json()).error);
+  toast(`Deleted ${id}`);
+  $('report').innerHTML = '';
+  await loadRecordings();
+}
+$('clearAll').onclick = async () => {
+  if (!confirm('Delete ALL saved recordings and auto before/after runs? Scenarios are kept. This cannot be undone.')) return;
+  const response = await fetch('/recordings/clear-all', { method: 'POST' });
+  const body = await response.json();
+  if (!response.ok) return toast(body.error);
+  toast(`Deleted ${body.deleted} recordings`);
+  $('report').innerHTML = '';
+  await loadRecordings();
+  await loadAutoSession();
+};
+$('deleteA').onclick = () => deleteRecording($('recA').value);
+$('deleteB').onclick = () => deleteRecording($('recB').value);
+async function openSummary(id) {
+  const response = await fetch(withSource(`/summary?id=${encodeURIComponent(id)}`));
+  if (!response.ok) return toast((await response.json()).error);
+  renderSummary(await response.json());
+}
+$('openA').onclick = () => openSummary($('recA').value);
+$('openB').onclick = () => openSummary($('recB').value);
+$('compare').onclick = async () => {
+  const response = await fetch(withSource(`/compare?a=${encodeURIComponent($('recA').value)}&b=${encodeURIComponent($('recB').value)}`));
+  if (!response.ok) return toast((await response.json()).error);
+  renderCompare(await response.json());
+};
+
+function renderSummary(summary) {
+  const m = summary.meta;
+  $('report').innerHTML = `
+    <div class="panel"><h2>${escapeHtml(m.id ?? m.label)} <span class="hint">${escapeHtml(m.platform)} · ${m.durationSec}s · ${m.jsSamples} JS / ${m.nativeSamples} native samples</span></h2>
+    <div class="table-wrap">${table([
+      { label: 'Screen', key: 'screen' }, { label: 's', key: 'seconds', num: true }, { label: 'Render ms/s', key: 'renderMsPerSec', num: true },
+      { label: 'Commits/s', key: 'commitsPerSec', num: true }, { label: 'Long tasks', key: 'longTasks', num: true }, { label: 'Max block', key: 'maxBlockMs', num: true },
+      { label: 'JS FPS', key: 'jsFps', num: true }, { label: 'UI FPS', key: 'uiFps', num: true }, { label: 'UI drops', key: 'uiDrops', num: true },
+      { label: 'CPU %', key: 'cpuPct', num: true }, { label: 'GC ms/s', key: 'hermesGcMsPerSec', num: true }, { label: 'Alloc MB/s', key: 'allocMbPerSec', num: true },
+      { label: 'Heap MB', key: 'heapMaxMb', num: true }, { label: 'Mem MB', key: 'memoryMaxMb', num: true }, { label: 'ART GC', key: 'artGcCount', num: true },
+      { label: 'Battery °C', key: 'batteryMaxC', num: true }, { label: 'CPU °C', key: 'cpuMaxC', num: true }, { label: 'Thermal', key: 'thermalMax', num: true }
+    ], summary.screens, 'No screens.')}</div></div>
+    <div class="grid" style="margin-top:12px">
+      <div class="panel"><h2>Components</h2><div class="table-wrap">${table([
+        { label: 'Component', key: 'component' }, { label: 'Screen', key: 'screen' }, { label: 'ms', key: 'selfMs', num: true },
+        { label: 'ms/s', key: 'msPerSec', num: true }, { label: 'Renders', key: 'renders', num: true },
+        { label: 'Compiler', key: 'compiler', render: r => compilerBadge(r.compiler) },
+        { label: 'Why', key: 'reasons', cls: 'file', render: r => reasonList(r.reasons) },
+        { label: 'Incl. library', key: 'library', cls: 'file', render: r => libraryList(r.library) }, { label: 'File', key: 'file', cls: 'file' }
+      ], summary.components.slice(0, 80), 'None.')}</div></div>
+      <div class="panel"><h2>Network</h2><div class="table-wrap">${table(NETWORK_COLUMNS(1), summary.network ?? [], 'No requests recorded.')}</div></div>
+      <div class="panel"><h2>Redux <span class="hint">${summary.redux ? `${summary.redux.dispatchesPerSec} dispatches/s · ${summary.redux.noopsPerSec}/s changed nothing` : 'no data'}</span></h2><div class="table-wrap">${table(SLICE_COLUMNS(1), summary.redux?.slices ?? [], 'No state changes recorded.')}</div></div>
+      <div class="panel"><h2>Files</h2><div class="table-wrap">${table([
+        { label: 'File', key: 'file', cls: 'file' }, { label: 'ms', key: 'selfMs', num: true }, { label: 'Renders', key: 'renders', num: true }
+      ], summary.files.slice(0, 60), 'None.')}</div></div>
+      <div class="panel"><h2>Threads</h2><div class="table-wrap">${table([
+        { label: 'Thread', key: 'thread' }, { label: 'avg %', key: 'cpuPct', num: true }, { label: 'CPU ms', key: 'cpuMs', num: true }
+      ], summary.threads.slice(0, 30), 'None.')}</div></div>
+      <div class="panel"><h2>Slowest commits</h2><div class="table-wrap">${table([
+        { label: 'Screen', key: 'screen' }, { label: 'ms', key: 'ms', num: true },
+        { label: 'Top components', key: 'top', render: r => escapeHtml(r.top.map(t => `${t.component} ${fmt(t.ms, 1)}`).join(', ')) }
+      ], summary.slowCommits, 'None.')}</div></div>
+    </div>`;
+}
+
+const LOWER_IS_BETTER = new Set(['batteryMaxC', 'cpuMaxC', 'thermalMax', 'renderMsPerSec', 'commitsPerSec', 'longTaskMsPerSec', 'maxBlockMs', 'hermesGcPerSec', 'hermesGcMsPerSec', 'allocMbPerSec', 'heapMaxMb', 'cpuPct', 'uiDrops', 'worstFrameMs', 'memoryMaxMb', 'artGcCount']);
+function changeCell(metric, value) {
+  if (value == null) return '–';
+  const worse = LOWER_IS_BETTER.has(metric) ? value > 0 : value < 0;
+  return `<span class="${value === 0 ? '' : worse ? 'up' : 'down'}">${value > 0 ? '+' : ''}${value}%</span>`;
+}
+
+function renderCompare(result, target = 'report') {
+  const screenRows = result.screens.flatMap(s => s.metrics.filter(m => m.before != null || m.after != null).map(m => ({ screen: s.screen, ...m })));
+  $(target).innerHTML = `
+    <div class="panel"><h2>Before: ${escapeHtml(result.before.id)} → After: ${escapeHtml(result.after.id)}</h2>
+    <div class="table-wrap">${table([
+      { label: 'Screen', key: 'screen' }, { label: 'Metric', key: 'metric' }, { label: 'Before', key: 'before', num: true },
+      { label: 'After', key: 'after', num: true }, { label: 'Change', key: 'change', num: true, render: r => changeCell(r.metric, r.change) }
+    ], screenRows, 'Nothing to compare.')}</div></div>
+    <div class="grid" style="margin-top:12px">
+      <div class="panel wide"><h2>Components with the biggest change <span class="hint">ms per second on screen</span></h2><div class="table-wrap">${table([
+        { label: 'Component', key: 'component' }, { label: 'Screen', key: 'screen' }, { label: 'Before', key: 'beforeMsPerSec', num: true },
+        { label: 'After', key: 'afterMsPerSec', num: true }, { label: 'Δ', key: 'deltaMsPerSec', num: true, render: r => `<span class="${r.deltaMsPerSec > 0 ? 'up' : 'down'}">${r.deltaMsPerSec > 0 ? '+' : ''}${r.deltaMsPerSec}</span>` },
+        { label: 'Renders/s', key: 'afterRendersPerSec', num: true, render: r => `${r.beforeRendersPerSec} → ${r.afterRendersPerSec}` },
+        { label: 'Why (after)', key: 'reasons', cls: 'file', render: r => escapeHtml(r.reasons || '–') },
+        { label: 'Compiler', key: 'afterCompiler', render: r => `${compilerBadge(r.beforeCompiler && { status: r.beforeCompiler, reasons: r.compilerReasons })} → ${compilerBadge(r.afterCompiler && { status: r.afterCompiler, reasons: r.compilerReasons })}` },
+        { label: 'File', key: 'file', cls: 'file' }
+      ], result.components, 'None.')}</div></div>
+      <div class="panel"><h2>Threads <span class="hint">avg % of one core</span></h2><div class="table-wrap">${table([
+        { label: 'Thread', key: 'thread' }, { label: 'Before', key: 'before', num: true }, { label: 'After', key: 'after', num: true },
+        { label: 'Change', key: 'change', num: true, render: r => changeCell('cpuPct', r.change) }
+      ], result.threads, 'None.')}</div></div>
+      <div class="panel"><h2>Network <span class="hint">requests per second</span></h2><div class="table-wrap">${table([
+        { label: 'Endpoint', key: 'key', cls: 'file' },
+        { label: 'per s', key: 'after_perSec', num: true, render: r => pairCell(r.before_perSec, r.after_perSec) },
+        { label: 'avg ms', key: 'after_avgMs', num: true, render: r => pairCell(r.before_avgMs, r.after_avgMs) },
+        { label: 'Duplicates', key: 'after_duplicates', num: true, render: r => pairCell(r.before_duplicates, r.after_duplicates) },
+        { label: 'Errors', key: 'after_errors', num: true, render: r => pairCell(r.before_errors, r.after_errors) }
+      ], result.network ?? [], 'No requests.')}</div></div>
+      <div class="panel"><h2>Redux <span class="hint">${result.store ? `dispatches/s ${result.store.dispatchesPerSec.before ?? '–'} → ${result.store.dispatchesPerSec.after ?? '–'} · changed nothing ${result.store.noopsPerSec.before ?? '–'} → ${result.store.noopsPerSec.after ?? '–'}` : ''}</span></h2><div class="table-wrap">${table([
+        { label: 'Slice', key: 'slice' },
+        { label: 'Updates/s', key: 'after_perSec', num: true, render: r => pairCell(r.before_perSec, r.after_perSec) },
+        { label: 'Renders/s after it', key: 'after_rendersPerSec', num: true, render: r => pairCell(r.before_rendersPerSec, r.after_rendersPerSec) }
+      ], result.slices ?? [], 'No state changes.')}</div></div>
+    </div>`;
+}
+
+// "before → after", red when it went up (all of these are lower-is-better).
+function pairCell(before, after) {
+  const cls = after > before ? 'up' : after < before ? 'down' : '';
+  const digits = value => (Number.isInteger(value) ? 0 : 2);
+  return `<span class="${cls}">${fmt(before, digits(before))} → ${fmt(after, digits(after))}</span>`;
+}
+
+// ---------- Auto before / after ----------
+const autoUi = { state: null, scenarios: [] };
+const post = async (url, body) => {
+  const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body ?? {}) });
+  const value = await response.json();
+  if (!response.ok) { toast(value.error); return null; }
+  return value;
+};
+const platformReady = platform => Boolean(autoUi.state?.[platform]);
+const selectedScenario = () => autoUi.scenarios.find(s => s.name === $('scenario').value);
+
+function updateAutoButtons() {
+  const state = autoUi.state;
+  if (!state) return;
+  const busy = state.phase !== 'idle';
+  const platform = $('capturePlatform').value;
+  const app = state.current?.[platform];
+  $('autoScreen').textContent = app?.screen ?? (platformReady(platform) ? 'app not open' : `off — run perf ${platform}`);
+  $('scenarioName').placeholder = (app?.screen ?? 'home').toLowerCase();
+  $('captureStart').disabled = busy || !app;
+  const scenario = selectedScenario();
+  for (const id of ['runBefore', 'runAfter']) $(id).disabled = busy || !scenario || !platformReady(scenario.platform);
+  for (const id of ['scenario', 'runs', 'scenarioName', 'capturePlatform']) $(id).disabled = busy;
+}
+
+function renderAuto(state) {
+  const previous = autoUi.state;
+  autoUi.state = state;
+  const busy = state.phase !== 'idle';
+  $('captureStart').hidden = state.phase === 'capturing';
+  $('captureStop').hidden = state.phase !== 'capturing';
+  $('autoCancel').hidden = state.phase !== 'running';
+  // Default the platform to the one that is connected.
+  if (!busy && !platformReady($('capturePlatform').value)) $('capturePlatform').value = state.ios && !state.android ? 'ios' : 'android';
+  const progress = state.phase === 'running' ? `${state.which} run ${state.run}/${state.runs} · ` : '';
+  $('autoStatus').innerHTML = state.error ? `<span class="up">${escapeHtml(state.error)}</span>` : escapeHtml(progress + (state.step || 'Idle'));
+  updateAutoButtons();
+  if (!busy && previous?.phase !== 'idle') loadScenarios(state.scenario);
+  // After set done: show the comparison straight away.
+  if (state.completed === 'after' && previous?.completed !== 'after') showAutoComparison(true);
+}
+
+async function loadScenarios(prefer) {
+  const data = await (await fetch('/auto')).json();
+  autoUi.scenarios = data.scenarios;
+  const keep = prefer || $('scenario').value || data.scenario;
+  $('scenario').innerHTML = data.scenarios.length
+    ? data.scenarios.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} · ${escapeHtml(s.platform)} · ${escapeHtml(s.start ?? '')} · ${s.gestures} gestures · ${s.durationSec}s</option>`).join('')
+    : '<option value="">no scenario yet — Start auto</option>';
+  if (data.scenarios.some(s => s.name === keep)) $('scenario').value = keep;
+  updateAutoButtons();
+  await loadAutoSession();
+}
+
+async function loadAutoSession() {
+  const name = $('scenario').value;
+  if (!name) { $('autoSession').textContent = ''; return; }
+  const session = await (await fetch(`/auto/session?scenario=${encodeURIComponent(name)}`)).json();
+  const when = at => (at ? `(${new Date(at).toLocaleString()})` : '');
+  $('autoSession').textContent = `Before: ${session.before.length} runs ${when(session.beforeAt)} · After: ${session.after.length} runs ${when(session.afterAt)}`;
+}
+$('scenario').onchange = () => { updateAutoButtons(); loadAutoSession(); };
+$('capturePlatform').onchange = updateAutoButtons;
+
+$('captureStart').onclick = () =>
+  post('/auto/capture/start', { name: $('scenarioName').value.trim(), platform: $('capturePlatform').value, runs: Number($('runs').value) });
+$('captureStop').onclick = () => post('/auto/capture/stop');
+const runAuto = which => post('/auto/run', { scenario: $('scenario').value, which, runs: Number($('runs').value) });
+$('runBefore').onclick = () => runAuto('before');
+$('runAfter').onclick = () => runAuto('after');
+$('autoCancel').onclick = () => post('/auto/cancel');
+
+function renderSpread(rows) {
+  const verdictCell = v => `<span class="${v === 'better' ? 'down' : v === 'worse' ? 'up' : 'muted'}">${escapeHtml(v)}</span>`;
+  return `<div class="panel" style="margin-bottom:12px"><h2>Run-to-run spread <span class="hint">better / worse only when every after run beats (or loses to) every before run</span></h2>
+    <div class="table-wrap">${table([
+      { label: 'Screen', key: 'screen' }, { label: 'Metric', key: 'metric' },
+      { label: 'Before runs', key: 'before', num: true, render: r => r.before.join(' / ') || '–' },
+      { label: 'After runs', key: 'after', num: true, render: r => r.after.join(' / ') || '–' },
+      { label: 'Verdict', key: 'verdict', render: r => verdictCell(r.verdict) }
+    ], rows, 'Nothing to compare.')}</div></div>`;
+}
+
+const autoUrl = () => `/export/auto?scenario=${encodeURIComponent($('scenario').value)}`;
+async function showAutoComparison(justFinished) {
+  const response = await fetch(`/auto/compare?scenario=${encodeURIComponent($('scenario').value)}`);
+  const result = await response.json();
+  if (!response.ok) return toast(result.error);
+  renderCompare(result, 'autoReport');
+  $('autoReport').insertAdjacentHTML('afterbegin', renderSpread(result.spread));
+  if (justFinished) {
+    // Without a click the browser may refuse the clipboard; the button is there for that case.
+    try {
+      await navigator.clipboard.writeText(await (await fetch(autoUrl())).text());
+      toast('Before / after done — comparison copied as text');
+    } catch {
+      toast('Before / after done — press Copy as text');
+    }
+  }
+}
+$('autoCompare').onclick = () => showAutoComparison(false);
+$('copyAuto').onclick = () => copyText(autoUrl());
+$('downloadAuto').onclick = () => download(autoUrl());
+setInterval(() => autoUi.state?.phase === 'idle' && fetch('/auto').then(r => r.json()).then(state => { autoUi.state = { ...autoUi.state, current: state.current }; updateAutoButtons(); }), 2000);
+
+fetch('/auto').then(response => response.json()).then(state => { renderAuto(state); loadScenarios(); });
+loadRecordings();
+</script>
+</body>
+</html>

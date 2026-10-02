@@ -1,0 +1,580 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Perf Tool Setup</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #5d6573; --border: #dfe3ea;
+    --good: #1a7f37; --warn: #9a6700; --bad: #cf222e; --accent: #0b62d6; --tip-bg: #16181d; --tip-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1116; --panel: #161b22; --text: #e6edf3; --muted: #8d96a0; --border: #2a313c;
+      --good: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #4493f8; --tip-bg: #e6edf3; --tip-text: #0e1116; }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { position: sticky; top: 0; z-index: 3; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 15px; margin: 0; }
+  main { max-width: 1040px; margin: 0 auto; padding: 16px; }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  h2 { font-size: 14px; margin: 0 0 10px; }
+  h3 { font-size: 13px; margin: 14px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .muted { color: var(--muted); }
+  .spacer { flex: 1; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  input, select, button, textarea { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; }
+  input, textarea { width: 100%; min-width: 0; }
+  input[type="checkbox"], input[type="radio"] { width: auto; margin: 0; accent-color: var(--accent); }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 120px; }
+  button { cursor: pointer; white-space: nowrap; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: default; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .grow { flex: 1; min-width: 220px; }
+  .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+  .field label { display: flex; gap: 6px; align-items: center; font-weight: 600; margin-bottom: 4px; }
+  .field .hint { margin-top: 4px; font-size: 12px; }
+  .field.wide { grid-column: 1 / -1; }
+  .hint.error { color: var(--bad); } .hint.warn { color: var(--warn); } .hint.ok { color: var(--good); }
+  .hint code, li code, p code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  /* Tooltip: hover or keyboard focus on the ⓘ */
+  .tip { position: relative; display: inline-flex; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--muted); color: var(--muted); font-size: 11px; font-weight: 700; align-items: center; justify-content: center; cursor: help; flex: none; }
+  .tip .bubble { visibility: hidden; opacity: 0; position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); width: min(340px, 80vw); padding: 8px 10px; border-radius: 8px; background: var(--tip-bg); color: var(--tip-text); font-weight: 400; font-size: 12px; line-height: 1.45; z-index: 5; transition: opacity .12s; pointer-events: none; text-transform: none; letter-spacing: 0; }
+  .tip:hover .bubble, .tip:focus .bubble { visibility: visible; opacity: 1; }
+  .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .checks li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .checks li:last-child { border-bottom: 0; }
+  .icon { font-weight: 700; }
+  .icon.ok { color: var(--good); } .icon.warn { color: var(--warn); } .icon.error { color: var(--bad); }
+  .variant { border: 1px solid var(--border); border-radius: 10px; padding: 12px; margin-top: 12px; }
+  .variant-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
+  .platform { display: flex; gap: 8px; align-items: center; font-weight: 600; margin: 12px 0 8px; }
+  .switch { display: inline-flex; gap: 8px; align-items: center; font-weight: 600; cursor: pointer; }
+  .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; border: 1px solid var(--border); background: var(--panel); }
+  .banner.available { border-color: var(--accent); }
+  .banner.error { border-color: var(--bad); }
+  .errors { color: var(--bad); margin: 8px 0 0; }
+  .commands { list-style: none; margin: 0; padding: 0; }
+  .commands li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .commands code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+  .commands .what { grid-column: 1; color: var(--muted); font-size: 12px; }
+  .commands button { grid-row: 1 / span 2; grid-column: 2; }
+  ol.steps li { margin: 6px 0; }
+  .output { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; max-height: 200px; overflow: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; margin-top: 6px; }
+  .toast { position: fixed; right: 16px; bottom: 16px; z-index: 6; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.25); }
+  @media (max-width: 720px) { .fields { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Perf Tool Setup</h1>
+  <span class="muted" id="toolVersion"></span>
+  <span class="spacer"></span>
+  <button id="checkUpdate" title="Look for a newer perf-tool in its git repository">Check for updates</button>
+</header>
+
+<main>
+  <div id="updateBanner" class="banner" hidden></div>
+
+  <section aria-labelledby="projectTitle">
+    <h2 id="projectTitle">1. Project</h2>
+    <div class="row">
+      <input class="grow" id="repo" placeholder="/Users/you/Projects/my-app" aria-label="Project folder" />
+      <button id="chooseRepo">Choose folder…</button>
+      <button class="primary" id="scan">Scan</button>
+    </div>
+    <p class="muted" id="scanStatus">Choose the React Native project folder (the one with package.json). The scan fills in everything it can find; the rest can be typed in.</p>
+  </section>
+
+  <section id="checksSection" aria-labelledby="checksTitle" hidden>
+    <h2 id="checksTitle">2. Requirements</h2>
+    <ul class="checks" id="checks"></ul>
+  </section>
+
+  <section id="settingsSection" aria-labelledby="settingsTitle" hidden>
+    <h2 id="settingsTitle">3. Settings</h2>
+    <div class="fields" id="projectFields"></div>
+
+    <h3>Domains</h3>
+    <label class="switch"><input type="checkbox" id="multi" /> Multi-domain (several brands / domains from one project)</label>
+    <p class="muted" id="multiNote"></p>
+    <div id="variants"></div>
+    <div class="row" id="addVariantRow" hidden><button id="addVariant">+ Add domain</button></div>
+  </section>
+
+  <section id="saveSection" hidden>
+    <div class="row">
+      <button class="primary" id="save">Save and install</button>
+      <span class="muted" id="saveSummary"></span>
+    </div>
+    <ul class="errors" id="saveErrors"></ul>
+  </section>
+
+  <section id="doneSection" aria-labelledby="doneTitle" hidden>
+    <h2 id="doneTitle">Ready</h2>
+    <p id="doneInfo"></p>
+    <h3>Start</h3>
+    <ol class="steps" id="steps"></ol>
+    <h3>Commands</h3>
+    <ul class="commands" id="commands"></ul>
+    <h3>yarn scripts</h3>
+    <p class="muted">Added to package.json while a perf session runs (and removed when it stops, unless they are committed):</p>
+    <ul class="commands" id="scripts"></ul>
+    <h3>Other commands</h3>
+    <ul class="commands" id="otherCommands"></ul>
+    <div class="row" style="margin-top:12px">
+      <button id="copyAll">Copy all commands</button>
+      <button id="closeSetup">Close setup</button>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = { repo: '', scan: null, project: null, found: [], multi: false, pasted: {}, showPaste: {} };
+
+function h(tag, attributes = {}, ...children) {
+  const element = document.createElement(tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    if (value == null || value === false) continue;
+    if (name.startsWith('on')) element.addEventListener(name.slice(2), value);
+    else if (name === 'html') element.innerHTML = value; // only for our own static hint texts
+    else element.setAttribute(name, value === true ? '' : value);
+  }
+  for (const child of children.flat()) if (child != null && child !== false) element.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  return element;
+}
+const toast = text => {
+  const element = h('div', { class: 'toast', role: 'status' }, text);
+  document.body.append(element);
+  setTimeout(() => element.remove(), 3500);
+};
+async function api(route, body) {
+  const response = await fetch(route, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error ?? response.statusText);
+  return data;
+}
+const copy = async text => {
+  try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Copy failed — select the text instead'); }
+};
+const esc = text => String(text ?? '').replace(/[&<>"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char]);
+
+let tipId = 0;
+function tip(text) {
+  const id = `tip${++tipId}`;
+  return h('span', { class: 'tip', tabindex: '0', role: 'img', 'aria-label': 'Help', 'aria-describedby': id }, 'i', h('span', { class: 'bubble', role: 'tooltip', id }, text));
+}
+
+// ------------------------------------------------------------ what is missing and how to fix it
+
+function issues() {
+  const scan = state.scan;
+  const project = state.project;
+  const found = {};
+  if (!scan || !project) return found;
+  const tools = scan.tools;
+  const anyIos = project.variants.some(variant => variant.ios);
+  const anyAndroid = project.variants.some(variant => variant.android);
+
+  found['tool.node'] = tools.node
+    ? { level: 'ok', text: `Node ${tools.node} for the project's builds (perf-tool itself runs on its built-in Node ${tools.toolNode})` }
+    : { level: 'error', text: 'Node.js not found. Metro (run by Xcode and Gradle) needs it.', fix: 'Install Node (the version in the project\'s .nvmrc / engines), e.g. <code>brew install nvm && nvm install 22</code>, then open the setup again.' };
+  found['tool.xcode'] = tools.xcode
+    ? { level: 'ok', text: `Xcode ${tools.xcode}` }
+    : { level: anyIos ? 'error' : 'warn', text: 'Xcode not found (needed for iOS).', fix: 'Install Xcode from the App Store, open it once, then <code>sudo xcode-select -s /Applications/Xcode.app</code>.' };
+  found['tool.pod'] = tools.pod
+    ? { level: 'ok', text: `CocoaPods ${tools.pod}` }
+    : { level: anyIos ? 'warn' : 'ok', text: anyIos ? 'CocoaPods not found (needed to install the iOS pods).' : 'CocoaPods: not needed', fix: anyIos ? '<code>brew install cocoapods</code> (or <code>sudo gem install cocoapods</code>).' : null };
+  found['tool.adb'] = tools.adb
+    ? { level: 'ok', text: `adb ${tools.adb}` }
+    : { level: anyAndroid ? 'error' : 'warn', text: 'adb not found (needed for Android).', fix: '<code>brew install --cask android-platform-tools</code>, or Android Studio → SDK Manager → Platform-Tools and add <code>~/Library/Android/sdk/platform-tools</code> to PATH.' };
+  found['project.nodeModules'] = scan.checks.nodeModules
+    ? { level: 'ok', text: 'node_modules installed' }
+    : { level: 'error', text: 'node_modules missing.', fix: 'Install the dependencies:', action: 'yarn-install', actionLabel: 'Run yarn install' };
+  found['project.pods'] = scan.checks.pods
+    ? { level: 'ok', text: 'iOS pods installed' }
+    : { level: anyIos ? 'error' : 'warn', text: 'ios/Pods missing.', fix: 'Install the pods:', action: 'pod-install', actionLabel: 'Run pod install' };
+  found['project.git'] = scan.checks.git
+    ? { level: 'ok', text: 'git repository (builds are told apart by commit + changes)' }
+    : { level: 'warn', text: 'Not a git repository: Auto before/after cannot warn when the "after" build is still the old code.', fix: 'In the project: <code>git init && git add -A && git commit -m init</code>.' };
+
+  found['project.name'] = project.name?.trim() ? null : { level: 'error', text: 'Required.' };
+  found['project.entry'] = project.entry?.trim() ? null : { level: 'error', text: 'Required: the file that calls AppRegistry.registerComponent, without extension (usually <code>index</code>).' };
+  found['project.metroConfig'] = project.metroConfig
+    ? null
+    : { level: 'error', text: 'No Metro config found.', fix: 'Create <code>metro.config.js</code> in the project root:<br><code>const { getDefaultConfig } = require(\'@react-native/metro-config\');</code><br><code>module.exports = getDefaultConfig(__dirname);</code>' };
+  found['project.navigationRef'] = project.navigationRef
+    ? null
+    : { level: 'warn', text: 'No navigation ref: screen names (per-screen numbers, the Auto start screen) will be missing.', fix: 'Create <code>src/navigator/navigationRef.js</code>:<br><code>import { createNavigationContainerRef } from \'@react-navigation/native\';</code><br><code>export const navigationRef = createNavigationContainerRef();</code><br>and pass <code>ref={navigationRef}</code> to <code>&lt;NavigationContainer&gt;</code>.' };
+  if (state.multi && project.envKind === 'module' && !project.envModule) {
+    found['project.envModule'] = { level: 'error', text: 'Several domains need an env module that each domain replaces.', fix: 'Create <code>env.js</code> in the project root with the settings the app imports (<code>export const API_URL = \'https://…\';</code>) and import them from there. Then add one <code>env.private.&lt;domain&gt;.js</code> per domain with the same exports, and <code>*.private.*</code> to .gitignore.' };
+  }
+
+  project.variants.forEach((variant, index) => {
+    const key = `v.${index}`;
+    const pasted = state.pasted[variant.id]?.trim();
+    // The default domain may build with the env module as it is (that is what the project is now).
+    const isDefault = project.defaultVariant === variant.id;
+    if (state.multi && project.envKind !== 'none' && !variant.env && !pasted && isDefault) {
+      found[`${key}.env`] = { level: 'ok', text: `Builds with ${esc(project.envKind === 'module' ? project.envModule ?? 'env.js' : '.env')} as it is (the default domain). Pick a file to bundle another one.` };
+    } else if (state.multi && project.envKind !== 'none' && !variant.env && !pasted) {
+      found[`${key}.env`] = project.envKind === 'react-native-config'
+        ? { level: 'warn', text: `No env file for ${variant.id}: the build uses .env.`, fix: `Create <code>.env.${esc(variant.id)}</code> in the project root with this domain's <code>KEY=value</code> lines, choose another file, or paste it here.` }
+        : { level: 'warn', text: `No env file for ${variant.id}: the build uses ${esc(project.envModule ?? 'env.js')} as it is.`, fix: `Create <code>env.private.${esc(variant.id)}.js</code> next to ${esc(project.envModule ?? 'env.js')} with the same exports and this domain's values, choose an existing file, or paste the content here (kept in ~/.config/perf-tool/env, outside the project).` };
+    }
+    if (variant.ios) {
+      if (!variant.ios.scheme) found[`${key}.ios.scheme`] = { level: 'error', text: 'Required.', fix: 'Xcode → Product → Scheme → Manage Schemes… → tick <b>Shared</b> for the app scheme, then scan again. For another domain, duplicate the app target and its scheme.' };
+      if (!variant.ios.bundleId) found[`${key}.ios.bundleId`] = { level: 'error', text: 'Required.', fix: 'Xcode → the app target → Signing &amp; Capabilities → Bundle Identifier (Release).' };
+      const team = scan.found.teams.find(item => item.id === variant.ios.team);
+      if (!variant.ios.team) {
+        found[`${key}.ios.team`] = { level: 'warn', text: 'No team: only simulators can be used.', fix: 'For a real iPhone: Xcode → Settings → Accounts → add the Apple ID of the team. The Team ID (10 characters) is on developer.apple.com → Account → Membership details.' };
+      } else if (!/^[A-Z0-9]{10}$/.test(variant.ios.team)) {
+        found[`${key}.ios.team`] = { level: 'error', text: 'A Team ID is 10 capital letters and digits, e.g. ABCDE12345.' };
+      } else if (!team?.certificate) {
+        found[`${key}.ios.team`] = { level: 'warn', text: 'No Apple Development certificate of this team in the Keychain.', fix: 'Xcode → Settings → Accounts → the team → Manage Certificates… → + → Apple Development.' };
+      } else if (!team.profiles) {
+        found[`${key}.ios.team`] = { level: 'ok', text: `${team.name}. No provisioning profile yet: the first perf ios build creates it (the iPhone must be registered in this team).` };
+      } else {
+        found[`${key}.ios.team`] = { level: 'ok', text: team.name };
+      }
+    }
+    if (variant.android && !variant.android.package) {
+      found[`${key}.android.package`] = { level: 'error', text: 'Required.', fix: '<code>android/app/build.gradle</code> → <code>defaultConfig { applicationId "…" }</code>, or the flavor\'s applicationId.' };
+    }
+    if (!variant.ios && !variant.android) found[`${key}.platforms`] = { level: 'error', text: `${variant.id}: turn on iOS, Android or both.` };
+  });
+  if (state.multi && project.variants.length > 1 && !project.variants.some(variant => variant.id === project.defaultVariant)) {
+    found.default = { level: 'error', text: 'Choose the default domain (built when no --variant is given).' };
+  }
+  return found;
+}
+
+function renderHints() {
+  const found = issues();
+  document.querySelectorAll('[data-hint]').forEach(element => {
+    const issue = found[element.dataset.hint];
+    element.className = `hint ${issue?.level ?? ''}`;
+    element.innerHTML = issue ? `${issue.text}${issue.fix ? `<br>${issue.fix}` : ''}` : '';
+  });
+  const errors = Object.values(found).filter(issue => issue?.level === 'error').length;
+  const warnings = Object.values(found).filter(issue => issue?.level === 'warn').length;
+  $('saveSummary').textContent = errors ? `${errors} required item${errors > 1 ? 's' : ''} missing` : warnings ? `${warnings} warning${warnings > 1 ? 's' : ''} (can be saved)` : 'Everything found';
+  $('save').disabled = errors > 0;
+}
+
+function renderChecks() {
+  const found = issues();
+  const keys = ['tool.node', 'tool.xcode', 'tool.pod', 'tool.adb', 'project.nodeModules', 'project.pods', 'project.git'];
+  $('checks').replaceChildren(...keys.map(key => {
+    const issue = found[key];
+    const symbol = { ok: '✓', warn: '!', error: '✗' }[issue.level];
+    const output = h('div', { class: 'output', hidden: true });
+    const button = issue.action
+      ? h('button', { onclick: async event => {
+          event.target.disabled = true;
+          event.target.textContent = 'Running…';
+          try {
+            const result = await api('/api/action', { action: issue.action, repo: state.repo });
+            output.hidden = false;
+            output.textContent = result.output;
+            toast(result.ok ? 'Done' : 'Failed — see the output');
+            if (result.ok) await scan();
+          } catch (error) { toast(error.message); }
+          event.target.disabled = false;
+          event.target.textContent = issue.actionLabel;
+        } }, issue.actionLabel)
+      : h('span');
+    return h('li', {},
+      h('span', { class: `icon ${issue.level}`, 'aria-label': issue.level }, symbol),
+      h('div', {}, h('div', { html: issue.text }), issue.fix ? h('div', { class: 'muted', html: issue.fix }) : null, output),
+      button);
+  }));
+}
+
+// ------------------------------------------------------------ form
+
+function field({ label, help, value, onInput, hint, placeholder, suggestions, wide, extra }) {
+  const listId = suggestions?.length ? `list${++tipId}` : null;
+  const input = h('input', { value: value ?? '', placeholder, list: listId, 'aria-label': label, oninput: event => { onInput(event.target.value); renderHints(); } });
+  return h('div', { class: `field${wide ? ' wide' : ''}` },
+    h('label', {}, label, tip(help)),
+    extra ? h('div', { class: 'row' }, h('div', { class: 'grow' }, input), extra) : input,
+    listId ? h('datalist', { id: listId }, suggestions.map(item => h('option', { value: item.value }, item.label ?? item.value))) : null,
+    hint ? h('div', { class: 'hint', 'data-hint': hint }) : null);
+}
+
+function renderProjectFields() {
+  const project = state.project;
+  const found = state.scan.found;
+  const envKindSelect = h('select', { 'aria-label': 'Env handling', onchange: event => { project.envKind = event.target.value; renderAll(); } },
+    [['module', 'JS module (e.g. env.js) replaced per domain'], ['react-native-config', 'react-native-config (.env files)'], ['none', 'none']]
+      .map(([value, text]) => h('option', { value, selected: project.envKind === value }, text)));
+  $('projectFields').replaceChildren(...[
+    field({ label: 'Project name', help: 'Shown on the dashboard and used for the cache folders. Any name.', value: project.name, onInput: value => (project.name = value), hint: 'project.name' }),
+    field({ label: 'Entry file', help: 'The file that calls AppRegistry.registerComponent, without extension. The probe build loads the probe first and then this file.', value: project.entry, onInput: value => (project.entry = value), hint: 'project.entry', placeholder: 'index' }),
+    field({ label: 'Metro config', help: 'The project\'s Metro config. The probe build wraps it (adds the profiling renderer and the probe) without changing it.', value: project.metroConfig, onInput: value => (project.metroConfig = value || null), hint: 'project.metroConfig', placeholder: 'metro.config.js' }),
+    h('div', { class: 'field' }, h('label', {}, 'Env handling', tip('How the app gets its per-domain settings. JS module: a file such as env.js that the app imports; each domain bundles its own file in its place (the project file is never changed). react-native-config: .env files, passed to the build as ENVFILE.')), envKindSelect),
+    project.envKind === 'module'
+      ? field({ label: 'Env module', help: 'The file the app imports its settings from (e.g. env.js). Each domain\'s env file replaces it in the probe build only.', value: project.envModule, onInput: value => (project.envModule = value || null), hint: 'project.envModule', placeholder: 'env.js' })
+      : null,
+    field({ label: 'Navigation ref', help: 'File exporting navigationRef (createNavigationContainerRef). Gives the probe the current screen name for per-screen numbers and lets Auto open the start screen. Optional.', value: project.navigationRef, onInput: value => (project.navigationRef = value || null), hint: 'project.navigationRef', placeholder: 'src/navigator/navigationRef.js' }),
+    field({ label: 'Source folders', help: 'Folders with the app\'s components, comma separated. Used to link renders to source files and for the React Compiler report. In-house packages can be added as node_modules/<package>/src.', value: project.sourceDirs.join(', '), onInput: value => (project.sourceDirs = value.split(',').map(item => item.trim()).filter(Boolean)), wide: true,
+      suggestions: found.sourceDirCandidates.map(value => ({ value: [...new Set([...project.sourceDirs, value])].join(', '), label: `+ ${value}` })) })
+  ].filter(Boolean));
+}
+
+const blankVariant = id => ({ id, env: null, ios: null, android: null });
+
+function renderVariants() {
+  const project = state.project;
+  const found = state.scan.found;
+  const teamSuggestions = found.teams.map(team => ({ value: team.id, label: `${team.name}${team.certificate ? '' : ' (no certificate)'}` }));
+  const envSuggestions = found.envFiles.map(item => ({ value: item.file, label: item.id }));
+
+  $('variants').replaceChildren(...project.variants.map((variant, index) => {
+    const key = `v.${index}`;
+    const togglePlatform = (platform, enabled) => {
+      const fromScan = state.found.find(item => item.id === variant.id)?.[platform];
+      variant[platform] = enabled ? fromScan ?? (platform === 'ios' ? { workspace: state.scan.found.workspace ?? '', scheme: '', bundleId: '', team: '', executable: '', splashScript: null } : { flavor: '', package: '' }) : null;
+      renderAll();
+    };
+    const pasteBox = state.showPaste[index]
+      ? h('div', { class: 'field wide' },
+          h('label', {}, `Paste the env for ${variant.id}`, tip('Saved when you press Save, to ~/.config/perf-tool/env (outside the project, readable only by you), and bundled instead of the env module for this domain.')),
+          h('textarea', { 'aria-label': `Env content for ${variant.id}`, placeholder: project.envKind === 'react-native-config' ? 'API_URL=https://…' : "export const API_URL = 'https://…';", oninput: event => { state.pasted[variant.id] = event.target.value; renderHints(); } }, state.pasted[variant.id] ?? ''))
+      : null;
+
+    return h('div', { class: 'variant' },
+      h('div', { class: 'variant-head' },
+        h('div', { class: 'grow' }, field({ label: state.multi ? 'Domain name' : 'Name', help: 'Short name used in commands: perf ios --variant <name> and yarn perf:ios:<name>. Letters, digits, . _ -', value: variant.id, onInput: value => { if (project.defaultVariant === variant.id) project.defaultVariant = value; variant.id = value; } })),
+        state.multi ? h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'default', checked: project.defaultVariant === variant.id, onchange: () => { project.defaultVariant = variant.id; renderHints(); } }), 'Default', tip('Built when the command has no --variant.')) : null,
+        state.multi && project.variants.length > 1 ? h('button', { onclick: () => { project.variants.splice(index, 1); renderAll(); } }, 'Remove') : null),
+      h('div', { class: 'hint', 'data-hint': 'default' }),
+      h('div', { class: 'hint', 'data-hint': `${key}.platforms` }),
+      project.envKind !== 'none'
+        ? h('div', { class: 'fields' },
+            field({ label: 'Env file', help: state.multi ? 'This domain\'s settings, bundled in place of the env module. Pick a found file, choose one, or paste it.' : 'Leave empty to build with the project\'s env as it is, or pick another env file.', value: variant.env, onInput: value => (variant.env = value || null), hint: `${key}.env`, suggestions: envSuggestions, wide: true, placeholder: state.multi ? `env.private.${variant.id}.js` : '(project env as it is)',
+              extra: [
+                h('button', { onclick: async () => { const { path } = await api('/api/choose-file', {}); if (path) { variant.env = path; renderAll(); } } }, 'Choose file…'),
+                h('button', { onclick: () => { state.showPaste[index] = !state.showPaste[index]; renderAll(); } }, state.showPaste[index] ? 'Hide paste' : 'Paste…')
+              ] }),
+            pasteBox)
+        : null,
+
+      h('div', { class: 'platform' }, h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: Boolean(variant.ios), onchange: event => togglePlatform('ios', event.target.checked) }), 'iOS')),
+      variant.ios ? h('div', { class: 'fields' },
+        field({ label: 'Scheme', help: 'The Xcode scheme that builds this domain. Only shared schemes are found (Product → Scheme → Manage Schemes → Shared).', value: variant.ios.scheme, onInput: value => {
+          variant.ios.scheme = value;
+          const scheme = found.schemes.find(item => item.scheme === value);
+          if (scheme) { variant.ios.bundleId = scheme.bundleId; variant.ios.executable = scheme.executable; renderAll(); }
+        }, hint: `${key}.ios.scheme`, suggestions: found.schemes.map(item => ({ value: item.scheme, label: item.bundleId })) }),
+        field({ label: 'Bundle id', help: 'PRODUCT_BUNDLE_IDENTIFIER of the Release build. Used to find the built app, its provisioning profile and to launch it.', value: variant.ios.bundleId, onInput: value => (variant.ios.bundleId = value), hint: `${key}.ios.bundleId`, suggestions: found.schemes.map(item => ({ value: item.bundleId, label: item.scheme })) }),
+        field({ label: 'Team ID', help: 'Apple team that signs the build for a real iPhone (10 characters). Found from the Keychain certificates and provisioning profiles; each domain can have its own team.', value: variant.ios.team, onInput: value => (variant.ios.team = value.trim().toUpperCase()), hint: `${key}.ios.team`, suggestions: teamSuggestions, placeholder: 'ABCDE12345' }),
+        field({ label: 'Workspace', help: 'The .xcworkspace (CocoaPods) or .xcodeproj, relative to the project.', value: variant.ios.workspace, onInput: value => (variant.ios.workspace = value), placeholder: 'ios/App.xcworkspace' }),
+        field({ label: 'Process name', help: 'The app executable (EXECUTABLE_NAME), used by perf ios-trace. Optional.', value: variant.ios.executable, onInput: value => (variant.ios.executable = value) }),
+        found.splashScripts.length
+          ? field({ label: 'Splash script', help: 'react-native-bootsplash script (package.json) that makes this domain\'s iOS boot splash. When several domains share one splash in the project, perf puts this one into the built app. Optional.', value: variant.ios.splashScript, onInput: value => (variant.ios.splashScript = value || null), suggestions: found.splashScripts.map(value => ({ value })) })
+          : null
+      ) : null,
+
+      h('div', { class: 'platform' }, h('label', { class: 'switch' }, h('input', { type: 'checkbox', checked: Boolean(variant.android), onchange: event => togglePlatform('android', event.target.checked) }), 'Android')),
+      variant.android ? h('div', { class: 'fields' },
+        field({ label: 'Flavor', help: 'Product flavor of this domain (Gradle task install<Flavor>Release). Empty when the app has no productFlavors.', value: variant.android.flavor, onInput: value => {
+          variant.android.flavor = value;
+          const flavor = found.flavors.find(item => item.flavor === value);
+          if (flavor) { variant.android.package = flavor.package; renderAll(); }
+        }, suggestions: found.flavors.map(item => ({ value: item.flavor, label: item.package })), placeholder: '(none)' }),
+        field({ label: 'Package', help: 'applicationId of the release build. Used to launch the app and to read its CPU, memory and frames over adb.', value: variant.android.package, onInput: value => (variant.android.package = value), hint: `${key}.android.package`, suggestions: found.flavors.map(item => ({ value: item.package, label: item.flavor })) })
+      ) : null
+    );
+  }));
+  $('addVariantRow').hidden = !state.multi;
+}
+
+function renderMultiNote() {
+  const others = state.found.filter(item => !state.project.variants.some(variant => variant.id === item.id));
+  $('multiNote').textContent = state.multi
+    ? 'Each domain can have its own env file, iOS scheme, bundle id and team, and Android flavor.'
+    : state.found.length > 1
+      ? `The scan found ${state.found.length} domains (${state.found.map(item => item.id).join(', ')}). Turn on Multi-domain to set them all up; now only ${state.project.variants[0]?.id} is used.`
+      : others.length ? '' : 'One app, one set of settings.';
+}
+
+function renderAll() {
+  renderProjectFields();
+  renderVariants();
+  renderMultiNote();
+  renderChecks();
+  renderHints();
+}
+
+$('multi').onchange = event => {
+  state.multi = event.target.checked;
+  const project = state.project;
+  if (state.multi) {
+    // Keeps what was edited on the single domain and adds the other found ones.
+    const current = project.variants[0];
+    project.variants = [current, ...state.found.filter(item => item.id !== current?.id).map(item => structuredClone(item))].filter(Boolean);
+    project.defaultVariant ??= current?.id;
+  } else {
+    const keep = project.variants.find(variant => variant.id === project.defaultVariant) ?? project.variants[0];
+    project.variants = keep ? [keep] : [];
+    project.defaultVariant = keep?.id ?? null;
+  }
+  renderAll();
+};
+$('addVariant').onclick = () => {
+  let id = 'domain';
+  for (let number = 2; state.project.variants.some(variant => variant.id === id); number += 1) id = `domain${number}`;
+  state.project.variants.push(blankVariant(id));
+  renderAll();
+};
+
+// ------------------------------------------------------------ scan / save
+
+async function scan() {
+  const repo = $('repo').value.trim();
+  if (!repo) return toast('Choose the project folder first');
+  $('scan').disabled = true;
+  $('scanStatus').textContent = 'Scanning… (Xcode build settings take a few seconds)';
+  try {
+    const result = await api('/api/scan', { repo });
+    state.repo = result.repo;
+    state.scan = result;
+    state.scan.found.workspace = result.project.variants.find(variant => variant.ios)?.ios.workspace ?? null;
+    state.found = structuredClone(result.project.variants);
+    if (result.saved) {
+      state.project = structuredClone(result.saved);
+      state.multi = result.saved.variants.length > 1;
+      $('scanStatus').textContent = `Loaded the saved settings of ${result.repo}. The scan results are offered as suggestions.`;
+    } else {
+      // One domain by default: the one the project builds now (or the first found).
+      const project = structuredClone(result.project);
+      const main = project.variants.find(variant => variant.id === project.defaultVariant) ?? project.variants[0];
+      project.variants = main ? [main] : [blankVariant('app')];
+      project.defaultVariant = project.variants[0].id;
+      state.project = project;
+      state.multi = false;
+      $('scanStatus').textContent = `Scanned ${result.repo} (React Native ${result.checks.reactNative}). Check the settings below; fields marked in red still need a value.`;
+    }
+    $('multi').checked = state.multi;
+    state.pasted = {};
+    state.showPaste = {};
+    for (const id of ['checksSection', 'settingsSection', 'saveSection']) $(id).hidden = false;
+    $('doneSection').hidden = true;
+    renderAll();
+  } catch (error) {
+    $('scanStatus').textContent = error.message;
+  }
+  $('scan').disabled = false;
+}
+$('scan').onclick = scan;
+$('repo').onkeydown = event => { if (event.key === 'Enter') scan(); };
+$('chooseRepo').onclick = async () => {
+  const { path } = await api('/api/choose-folder', {});
+  if (path) { $('repo').value = path; scan(); }
+};
+
+$('save').onclick = async () => {
+  $('saveErrors').replaceChildren();
+  $('save').disabled = true;
+  try {
+    const project = structuredClone(state.project);
+    if (!state.multi) project.defaultVariant = project.variants[0]?.id;
+    for (const variant of project.variants) {
+      const content = state.pasted[variant.id]?.trim();
+      if (content) variant.env = (await api('/api/env', { project: project.name, variant: variant.id, content })).path;
+    }
+    const result = await api('/api/save', { repo: state.repo, project });
+    if (!result.ok) {
+      $('saveErrors').replaceChildren(...result.errors.map(error => h('li', {}, error)));
+      return;
+    }
+    state.project = project;
+    renderDone(result);
+  } catch (error) {
+    $('saveErrors').replaceChildren(h('li', {}, error.message));
+  } finally {
+    $('save').disabled = false;
+  }
+};
+
+function commandItem({ command, what }) {
+  return h('li', {}, h('code', {}, command), what ? h('span', { class: 'what' }, what) : null, h('button', { onclick: () => copy(command), 'aria-label': `Copy ${command}` }, 'Copy'));
+}
+
+let allCommands = '';
+function renderDone(result) {
+  const { commands, cli, repo } = result;
+  $('doneInfo').innerHTML = `Saved for <code>${esc(repo)}</code>. The <code>perf</code> command is linked at <code>${esc(cli.link)}</code>.${cli.pathNote ? `<br><span class="hint warn">${esc(cli.pathNote)}</span>` : ''}`;
+  const anyIos = state.project.variants.some(variant => variant.ios);
+  const anyAndroid = state.project.variants.some(variant => variant.android);
+  $('steps').replaceChildren(...[
+    h('li', { html: 'Open a <b>new</b> Terminal window (so it finds the <code>perf</code> command).' }),
+    h('li', { html: `<code>cd ${esc(repo)}</code>` }),
+    anyIos ? h('li', { html: 'iOS: connect the iPhone by cable, unlock it, tap <b>Trust</b>, and turn on Settings → Privacy &amp; Security → <b>Developer Mode</b> (once).' }) : null,
+    anyAndroid ? h('li', { html: 'Android: connect the phone by USB with <b>USB debugging</b> on (Settings → Developer options) and accept the prompt on the phone.' }) : null,
+    h('li', { html: `Run one of the commands below, e.g. <code>${esc(commands.main[0]?.command ?? 'perf ios')}</code>. It builds a Release app with the probe, installs it, and opens the dashboard at <code>http://localhost:8099</code>.` }),
+    h('li', { html: 'In the dashboard: <b>Live</b> shows the numbers while you use the app, <b>Record</b> saves a session, <b>Auto before / after</b> replays the same gestures on two builds and compares them.' }),
+    h('li', { html: 'Ctrl-C in the Terminal stops the server (an active recording is saved).' })
+  ].filter(Boolean));
+  $('commands').replaceChildren(...commands.main.map(commandItem));
+  $('scripts').replaceChildren(...commands.scripts.map(command => commandItem({ command })));
+  $('otherCommands').replaceChildren(...commands.other.map(commandItem));
+  allCommands = [...commands.main.map(item => `${item.command}    # ${item.what}`), '', ...commands.scripts, '', ...commands.other.map(item => `${item.command}    # ${item.what}`)].join('\n');
+  $('doneSection').hidden = false;
+  $('doneSection').scrollIntoView({ behavior: 'smooth' });
+}
+$('copyAll').onclick = () => copy(allCommands);
+$('closeSetup').onclick = async () => {
+  await api('/api/quit', {}).catch(() => {});
+  document.body.replaceChildren(h('main', {}, h('section', {}, h('h2', {}, 'Setup closed'), h('p', { class: 'muted', html: 'Open it again with <code>perf init</code> or the Perf Tool app.' }))));
+};
+
+// ------------------------------------------------------------ updates
+
+function renderUpdate(update) {
+  const banner = $('updateBanner');
+  $('toolVersion').textContent = update.current ? `version ${update.current}` : '';
+  if (update.state === 'current') { banner.hidden = true; return; }
+  banner.hidden = false;
+  banner.className = `banner ${update.state === 'available' ? 'available' : update.state === 'error' ? 'error' : ''}`;
+  if (update.state === 'available') {
+    banner.replaceChildren(
+      h('div', { class: 'row' }, h('strong', {}, `Update available: ${update.behind} change${update.behind > 1 ? 's' : ''}`), h('span', { class: 'spacer' }),
+        h('button', { class: 'primary', onclick: async event => {
+          event.target.disabled = true;
+          try { renderUpdate(await api('/api/update', {})); toast('Updated. Reload this page to use the new version.'); }
+          catch (error) { toast(error.message); event.target.disabled = false; }
+        } }, 'Update now')),
+      h('ul', {}, update.changes.map(change => h('li', {}, change))));
+  } else {
+    banner.replaceChildren(h('span', { class: 'muted' }, update.message));
+  }
+}
+$('checkUpdate').onclick = async () => {
+  const update = await api('/api/update');
+  renderUpdate(update);
+  if (update.state === 'current') toast('perf-tool is up to date');
+};
+
+// ------------------------------------------------------------ start
+
+(async () => {
+  try {
+    const initial = await api('/api/state');
+    renderUpdate(initial.update);
+    if (initial.initialRepo) { $('repo').value = initial.initialRepo; scan(); }
+  } catch (error) {
+    toast(error.message);
+  }
+})();
+// The server stops a while after the last open page is closed.
+setInterval(() => fetch('/api/ping', { method: 'POST' }).catch(() => {}), 20000);
+</script>
+</body>
+</html>
