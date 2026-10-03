@@ -210,6 +210,24 @@ function installNetworkHook() {
   };
 }
 
+// React's own fibers have no component name; labelled so their time shows up in the breakdown.
+const REACT_FIBER_NAMES = {
+  4: 'Portal',
+  7: 'Fragment',
+  8: 'Mode',
+  9: 'Context.Consumer',
+  10: 'Context.Provider',
+  12: 'Profiler',
+  13: 'Suspense',
+  19: 'SuspenseList',
+  22: 'Offscreen',
+  31: 'Activity'
+};
+
+function fiberLabel(fiber) {
+  return componentName(fiber) || REACT_FIBER_NAMES[fiber.tag] || null;
+}
+
 function componentName(fiber) {
   const type = fiber.type;
   if (!type) return null;
@@ -247,6 +265,12 @@ function onCommit(root) {
     const isComponent = COMPONENT_TAGS.has(fiber.tag);
     const name = isComponent ? componentName(fiber) : null;
     const isOwn = name !== null && ownComponents.has(name);
+    const performedWork = isComponent && (fiber.flags & PERFORMED_WORK) === PERFORMED_WORK;
+    // Time belongs to the closest of our components that rendered in this commit. One that bailed
+    // out (memo) did no work: library and React fibers under it (frozen screens' Suspense/Offscreen,
+    // navigators) were charged to it before, so an idle provider looked like the most expensive one.
+    const ownsTime = isOwn && performedWork;
+    const label = fiberLabel(fiber);
     if (fiber.tag === CONTEXT_PROVIDER_TAG && fiber.type) {
       const context = fiber.type._context || fiber.type;
       if (!contextOwners.has(context) && parentOwner) contextOwners.set(context, parentOwner);
@@ -254,7 +278,7 @@ function onCommit(root) {
     if (!reduxStore && fiber.memoizedProps && fiber.memoizedProps.store) attachStore(fiber.memoizedProps.store);
     // Time is charged to the closest component defined in our sources; library-only subtrees
     // (navigation containers, providers) keep their own name.
-    const owner = isOwn ? name : parentOwner || name || '(host)';
+    const owner = ownsTime ? name : parentOwner || (isOwn ? null : name) || '(host)';
     const descend =
       fiber.actualDuration !== 0 && (fiber.alternate === null || fiber.alternate.child !== fiber.child);
 
@@ -263,11 +287,11 @@ function onCommit(root) {
       selfMs = fiber.actualDuration;
       for (let child = fiber.child; child !== null; child = child.sibling) {
         selfMs -= child.actualDuration;
-        stack.push({ fiber: child, screen, owner: isOwn ? name : parentOwner });
+        stack.push({ fiber: child, screen, owner: ownsTime ? name : parentOwner });
       }
     }
 
-    const rendered = (isOwn || !parentOwner) && isComponent && (fiber.flags & PERFORMED_WORK) === PERFORMED_WORK;
+    const rendered = (isOwn || !parentOwner) && performedWork;
     if (selfMs <= 0 && !rendered) continue;
 
     const key = screen + '\u0000' + owner;
@@ -278,9 +302,9 @@ function onCommit(root) {
     }
     if (selfMs > 0) {
       entry.selfMs += selfMs;
-      if (name !== owner && name) {
+      if (label && label !== owner) {
         entry.libraryMs += selfMs;
-        entry.library[name] = (entry.library[name] || 0) + selfMs;
+        entry.library[label] = (entry.library[label] || 0) + selfMs;
       }
     }
     if (rendered) {
