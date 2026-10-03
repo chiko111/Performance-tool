@@ -66,7 +66,7 @@ Uninstall: `./install.sh --uninstall`
 From the project folder:
 
 ```sh
-perf ios                          # the iPhone connected by cable
+perf ios                          # pick a connected iPhone or a simulator from a list
 perf ios "iPhone 15"              # or a device / simulator by name
 perf android                      # the connected Android device
 perf android <serial>             # with several devices: the serial

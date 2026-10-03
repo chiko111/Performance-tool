@@ -7,7 +7,8 @@
 #   perf init                            Setup page: scan the project, fill in or fix the settings
 #   perf ios ["<device or simulator>"] [--variant <name>] [--team ID]
 #                                        Server + Release build with probe + install + dashboard
-#                                        (no device name: the one connected iPhone)
+#                                        (no device name: pick from a list; outside a
+#                                        terminal the one iPhone connected by cable)
 #   perf android [serial] [--variant <name>]
 #                                        Server + Android release with probe + install + dashboard
 #   perf setup [--remove]                Add (or remove) the yarn perf:* scripts in package.json
@@ -83,10 +84,16 @@ check_for_update() {
   return 0
 }
 
+# The "== Devices ==" section of `xctrace list devices`: real iPhones/iPads (and this Mac). It ends
+# at the next "== … ==" header: "== Devices Offline ==" only exists while a device is offline,
+# otherwise "== Simulators ==" follows directly.
+xctrace_devices() {
+  xcrun xctrace list devices 2>/dev/null | awk '/^== /{on = ($0 == "== Devices ==")} on && !/^== /' || true
+}
+
 list_devices() {
   echo "iOS devices:"
-  xcrun xctrace list devices 2>/dev/null | sed -n '/== Devices ==/,/== Devices Offline ==/p' |
-    grep -E '^.+ \([0-9.]+\) \(' | sed -E 's/ \(([0-9.]+)\) \(.*$/   (iOS \1)/; s/^/  /' || true
+  xctrace_devices | grep -E '^.+ \([0-9.]+\) \(' | sed -E 's/ \(([0-9.]+)\) \(.*$/   (iOS \1)/; s/^/  /' || true
   echo "iOS simulators:"
   xcrun simctl list devices available | grep -E '^[[:space:]]+(iPhone|iPad)' | sed -E 's/ \([0-9A-F-]{36}\)//; s/^[[:space:]]+/  /' || true
   if command -v adb >/dev/null 2>&1; then
@@ -95,37 +102,100 @@ list_devices() {
   fi
 }
 
-# Sets KIND (device|simulator) and UDID for a device or simulator name.
 # Names of iPhones/iPads connected by cable (paired Wi-Fi devices are listed but not picked).
+# With --wifi also the paired Wi-Fi ones, as "name<TAB>cable|Wi-Fi".
 connected_ios_devices() {
   local json
   json="$(mktemp)"
   xcrun devicectl list devices --json-output "$json" >/dev/null 2>&1 || true
   "$NODE" -e 'try {
+    const wifi = process.argv[2] === "--wifi";
     // mktemp gives no .json extension, so require() would parse the file as JavaScript.
-    for (const device of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).result.devices)
-      if (device.connectionProperties?.transportType === "wired") console.log(device.deviceProperties.name);
-  } catch {}' "$json"
+    for (const device of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).result.devices) {
+      const transport = device.connectionProperties?.transportType;
+      if (transport === "wired") console.log(wifi ? `${device.deviceProperties.name}\tcable` : device.deviceProperties.name);
+      else if (wifi && transport === "localNetwork") console.log(`${device.deviceProperties.name}\tWi-Fi`);
+    }
+  } catch {}' "$json" "${1:-}"
   rm -f "$json"
 }
 
+# Available iPhone/iPad simulators as "udid<TAB>name<TAB>iOS x.y[, booted]": booted first, then
+# iPhones before iPads, then newest iOS.
+available_simulators() {
+  xcrun simctl list devices available --json 2>/dev/null | "$NODE" -e '
+    let input = "";
+    process.stdin.on("data", chunk => input += chunk).on("end", () => {
+      try {
+        const rows = [];
+        for (const [runtime, devices] of Object.entries(JSON.parse(input).devices)) {
+          const version = runtime.match(/SimRuntime\.iOS-(\d+)-(\d+)/);
+          if (!version) continue;
+          for (const device of devices)
+            if (/^(iPhone|iPad)/.test(device.name))
+              rows.push({ ...device, os: `iOS ${version[1]}.${version[2]}`, rank: +version[1] * 1000 + +version[2] });
+        }
+        const booted = row => row.state === "Booted";
+        const iphone = row => row.name.startsWith("iPhone");
+        rows.sort((a, b) => booted(b) - booted(a) || iphone(b) - iphone(a) || b.rank - a.rank || a.name.localeCompare(b.name));
+        for (const row of rows) console.log([row.udid, row.name, row.os + (booted(row) ? ", booted" : "")].join("\t"));
+      } catch {}
+    });' || true
+}
+
+# Asks which connected iPhone or simulator to run on. Sets DEVICE_NAME; for a simulator also UDID
+# and KIND (by UDID, since one simulator name can exist for several iOS versions).
+pick_ios_target() {
+  local labels=() names=() udids=() udid name info
+  while IFS=$'\t' read -r name info; do
+    [[ -n "$name" ]] || continue
+    labels+=("$(printf '%-28s device, %s' "$name" "$info")"); names+=("$name"); udids+=("")
+  done <<<"$(connected_ios_devices --wifi)"
+  while IFS=$'\t' read -r udid name info; do
+    [[ -n "$udid" ]] || continue
+    labels+=("$(printf '%-28s simulator, %s' "$name" "$info")"); names+=("$name"); udids+=("$udid")
+  done <<<"$(available_simulators)"
+  local count=${#names[@]}
+  [[ $count -gt 0 ]] || fail "no iPhone connected by cable and no iOS simulator available (perf devices)"
+  echo "Run on:" >&2
+  local i
+  for ((i = 0; i < count; i++)); do printf '  %2d) %s\n' $((i + 1)) "${labels[$i]}" >&2; done
+  local choice
+  while true; do
+    read -r -p "Choose 1-$count [Enter = 1]: " choice || exit 130
+    choice="${choice:-1}"
+    [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= count)) && break
+    echo "Enter a number from 1 to $count." >&2
+  done
+  DEVICE_NAME="${names[$((choice - 1))]}"
+  if [[ -n "${udids[$((choice - 1))]}" ]]; then UDID="${udids[$((choice - 1))]}"; KIND=simulator; fi
+}
+
+# Sets KIND (device|simulator) and UDID for a device or simulator name. Without a name: a menu in
+# a terminal, otherwise the one iPhone connected by cable.
 resolve_ios_target() {
   local name="$1"
+  UDID=""
   if [[ -z "$name" ]]; then
-    local devices
-    devices="$(connected_ios_devices)"
-    if [[ -n "$devices" && "$(wc -l <<<"$devices")" -eq 1 ]]; then
-      name="$devices"
-      DEVICE_NAME="$name"
-      echo "Using the connected device: $name"
+    if [[ -t 0 && -t 2 ]]; then
+      pick_ios_target
+      [[ -n "$UDID" ]] && return
+      name="$DEVICE_NAME"
     else
-      echo "No single iPhone connected by cable — pass the device or simulator name, e.g. perf ios \"iPhone 16 plus\"" >&2
-      list_devices
-      exit 1
+      local devices
+      devices="$(connected_ios_devices)"
+      if [[ -n "$devices" && "$(wc -l <<<"$devices")" -eq 1 ]]; then
+        name="$devices"
+        DEVICE_NAME="$name"
+        echo "Using the connected device: $name"
+      else
+        echo "No single iPhone connected by cable — pass the device or simulator name, e.g. perf ios \"iPhone 16 plus\"" >&2
+        list_devices
+        exit 1
+      fi
     fi
   fi
-  UDID="$(xcrun xctrace list devices 2>/dev/null | sed -n '/== Devices ==/,/== Devices Offline ==/p' |
-    grep -F "$name (" | head -1 | grep -oE '\([0-9A-Fa-f-]{20,}\)$' | tr -d '()' || true)"
+  UDID="$(xctrace_devices | grep -F "$name (" | head -1 | grep -oE '\([0-9A-Fa-f-]{20,}\)$' | tr -d '()' || true)"
   if [[ -n "$UDID" ]]; then KIND=device; return; fi
   UDID="$(xcrun simctl list devices available | grep -F "    $name (" | sort -r -t'(' -k3 | grep -m1 -oE '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' || true)"
   if [[ -n "$UDID" ]]; then KIND=simulator; return; fi
