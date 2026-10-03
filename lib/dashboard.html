@@ -545,7 +545,7 @@ function renderTables() {
     if (c.compiler && row.compiler?.source !== 'runtime') row.compiler = c.compiler;
     for (const [name, value] of Object.entries(c.library ?? {})) row.library[name] = (row.library[name] ?? 0) + value;
     row.ms += c.selfMs; row.renders += c.renders; row.mounts += c.mounts; components.set(key, row);
-    const fileKey = c.file ?? `(library) ${c.component}`;
+    const fileKey = c.file ?? (c.component === '(library)' ? '(library)' : `(library) ${c.component}`);
     const f = files.get(fileKey) ?? { file: fileKey, ms: 0, renders: 0 };
     f.ms += c.selfMs; f.renders += c.renders; files.set(fileKey, f);
   }

@@ -278,7 +278,9 @@ function onCommit(root) {
     if (!reduxStore && fiber.memoizedProps && fiber.memoizedProps.store) attachStore(fiber.memoizedProps.store);
     // Time is charged to the closest component defined in our sources; library-only subtrees
     // (navigation containers, providers) keep their own name.
-    const owner = ownsTime ? name : parentOwner || (isOwn ? null : name) || '(host)';
+    // Without a rendered component of ours above, library and React fibers share one row per
+    // screen; the breakdown keeps their names.
+    const owner = ownsTime ? name : parentOwner || '(library)';
     const descend =
       fiber.actualDuration !== 0 && (fiber.alternate === null || fiber.alternate.child !== fiber.child);
 
