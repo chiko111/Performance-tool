@@ -253,6 +253,10 @@ function onCommit(root) {
   const rootFiber = root.current;
   if (!rootFiber) return;
   const commitMs = rootFiber.actualDuration || 0;
+  // React stamps actualStartTime when it begins a fiber in a render; a fiber it did not process in
+  // this render keeps an older stamp together with that older render's actualDuration.
+  const renderStartTime = rootFiber.actualStartTime;
+  const wasProcessed = fiber => !(renderStartTime >= 0) || fiber.actualStartTime >= renderStartTime;
   current.commits += 1;
   current.commitMs += commitMs;
 
@@ -261,6 +265,7 @@ function onCommit(root) {
   const stack = [{ fiber: rootFiber, screen: '(root)', owner: null }];
   while (stack.length) {
     const { fiber, screen: parentScreen, owner: parentOwner } = stack.pop();
+    if (!wasProcessed(fiber)) continue;
     const screen = screenName(fiber, parentScreen);
     const isComponent = COMPONENT_TAGS.has(fiber.tag);
     const name = isComponent ? componentName(fiber) : null;
