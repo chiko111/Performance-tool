@@ -522,9 +522,13 @@ const SLICE_COLUMNS = seconds => [
   { label: 'Renders/s', key: 'rendersPerSec', num: true, render: r => fmt(r.rendersPerSec ?? r.renders / seconds, 1) }
 ];
 
+// Same as isNotMemoized in compiler-status.mjs: error boundaries can only be classes, nothing to fix.
+const isNotMemoized = status => status != null && status !== 'compiled' && status !== 'error-boundary';
+
 function compilerBadge(compiler) {
   if (!compiler) return '<span class="muted">–</span>';
   if (compiler.status === 'compiled') return `<span class="down" title="${compiler.source === 'runtime' ? 'useMemoCache seen at runtime' : (compiler.memoSlots ?? '') + ' memo slots'}">✓ memo</span>`;
+  if (!isNotMemoized(compiler.status)) return `<span class="muted" title="${escapeHtml((compiler.reasons ?? []).join('\n'))}">– ${escapeHtml(compiler.status)}</span>`;
   return `<span class="up" title="${escapeHtml((compiler.reasons ?? []).join('\n'))}">✗ ${escapeHtml(compiler.status)}</span>`;
 }
 
@@ -582,7 +586,7 @@ function renderTables() {
     { label: 'Component', key: 'component' }, { label: 'ms', key: 'ms', num: true, render: ms }, { label: 'Renders', key: 'renders', num: true },
     { label: 'Why not memoized', key: 'compiler', cls: 'file', render: r => escapeHtml((r.compiler.reasons ?? []).join(' · ') || r.compiler.status) },
     { label: 'File', key: 'file', cls: 'file', render: r => escapeHtml(`${r.file}${r.compiler.line ? ':' + r.compiler.line : ''}`) }
-  ], [...components.values()].filter(r => r.compiler && r.compiler.status !== 'compiled').sort((a, b) => b.ms - a.ms).slice(0, 40),
+  ], [...components.values()].filter(r => isNotMemoized(r.compiler?.status)).sort((a, b) => b.ms - a.ms).slice(0, 40),
   'Every rendered component from our sources is memoized by React Compiler.');
   $('filesTable').innerHTML = table([
     { label: 'File', key: 'file', cls: 'file' }, { label: 'ms', key: 'ms', num: true, render: ms }, { label: 'Renders', key: 'renders', num: true }
