@@ -231,6 +231,23 @@ build_progress() {
     ${SERVER_PID:+--dashboard "$DASHBOARD"}
 }
 
+# React Native's react-native-xcode.sh expands BUNDLE_CONFIG unquoted ("--config $BUNDLE_CONFIG"),
+# so a path with spaces (the app installs into "Application Support") is split. Hands Xcode a
+# space-free symlink instead; Node follows it, so the config's absolute requires are unaffected.
+bundle_config_path() {
+  local config="$GEN/metro.config.js"
+  [[ "$config" =~ [[:space:]] ]] || { echo "$config"; return; }
+  local dir="$CACHE"
+  if [[ "$dir" =~ [[:space:]] ]]; then
+    dir="/tmp/perf-tool-$(id -u)/$(printf '%s' "$NAME" | tr -c 'A-Za-z0-9._-' '_')"
+    mkdir -p -m 700 "$(dirname "$dir")"
+    [[ -O "$(dirname "$dir")" && ! -L "$(dirname "$dir")" ]] || fail "$(dirname "$dir") is not owned by you — remove it and retry"
+  fi
+  mkdir -p "$dir"
+  ln -sfn "$config" "$dir/metro.config.js"
+  echo "$dir/metro.config.js"
+}
+
 build_ios() {
   local sdk=$([[ "$KIND" == simulator ]] && echo iphonesimulator || echo iphoneos)
   [[ ! -f "$REPO/ios/Podfile" || -d "$REPO/ios/Pods" ]] || fail "ios/Pods missing — run 'cd ios && pod install' first"
@@ -249,7 +266,9 @@ build_ios() {
   [[ "$IOS_WORKSPACE" == *.xcodeproj ]] && container=(-project "$IOS_WORKSPACE")
   echo "Building Release + probe → $DEVICE_NAME ($KIND, $VARIANT, scheme '$IOS_SCHEME'). Log: $CACHE/ios-build.log"
   # Separate DerivedData: probe builds never invalidate or replace the normal build cache.
-  BUNDLE_CONFIG="$GEN/metro.config.js" ENTRY_FILE="$GEN/bundle/index.perf.js" \
+  local bundle_config
+  bundle_config="$(bundle_config_path)"
+  BUNDLE_CONFIG="$bundle_config" ENTRY_FILE="$GEN/bundle/index.perf.js" \
     xcodebuild "${container[@]}" -scheme "$IOS_SCHEME" -configuration Release \
     -destination "id=$UDID" -derivedDataPath "$CACHE/ios" -xcconfig "$GEN/perf.xcconfig" \
     -allowProvisioningUpdates "${signing[@]+"${signing[@]}"}" build 2>&1 | build_progress ios "$CACHE/ios-build.log" || true
