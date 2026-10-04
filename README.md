@@ -148,7 +148,9 @@ device or simulator).
 The comparison is the median Before run against the median After run. The *Run-to-run spread*
 table shows each run's value. "better" / "worse" means every After run beat / lost to every
 Before run; otherwise the difference is **within the noise**. An After run on the same code as
-Before is refused, and a run that opens a screen outside the scenario is repeated.
+Before is refused. A run must go through the screens in the order of the capture: one that goes
+to another screen is stopped right away and repeated, as is one that never reaches a screen of
+the scenario (a tap that hit a moving banner, content that changed).
 
 Do not touch the phone while a run is going. Compare runs with runs: your own pass and a replay
 are not the same, because the replay plays gestures at an even speed. Data from the server can
