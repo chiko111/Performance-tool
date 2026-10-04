@@ -156,8 +156,12 @@ still differ between runs, which is why there are several runs and a median. Avo
 content that moves on its own (auto-scrolling carousels) when recording a scenario.
 
 **How it works per platform:**
-- **Android:** gestures are read from the touchscreen with `adb shell getevent` and played with
-  `adb shell input tap|swipe`.
+- **Android:** gestures are read from the touchscreen with `adb shell getevent`, every touch
+  frame with its time. A small helper from `android/replay` (a prebuilt `perf-replay.dex`, run
+  with `app_process`; nothing is installed) injects the same frames on the same times, so scrolls
+  and flings end where they ended during the capture. Mouse-wheel and trackpad scrolling on the
+  emulator is captured too. Scenarios recorded with an older perf-tool have no frames and are
+  played with `adb shell input tap|swipe`: capture them again for an exact replay.
 - **iOS:** the native probe in the probe build sends every finished gesture to the server (in
   points, with the release speed). A small XCUITest runner from `ios/replay` plays them,
   driving the installed app by bundle id. The project is not touched.
