@@ -69,6 +69,14 @@
   .up { color: var(--bad); } .down { color: var(--good); }
   .empty { color: var(--muted); padding: 12px 0; }
   .muted { color: var(--muted); }
+  .crashes { border-color: var(--bad); margin: 12px 0; }
+  .crashes h2 { color: var(--bad); }
+  .crash { padding: 6px 0; border-top: 1px solid var(--border); }
+  .crash:first-of-type { border-top: 0; }
+  .crash .when { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .crash.reported h3 { color: var(--warn); }
+  .crash h3 { font-size: 13px; margin: 0 0 2px; color: var(--bad); }
+  .crash pre { margin: 4px 0 0; font-size: 11px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
   .help { margin-top: 12px; } .help summary { cursor: pointer; font-weight: 600; } .help li { margin: 4px 0; }
   .steps { margin: 12px 0; padding-left: 20px; } .steps li { margin: 4px 0; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
@@ -107,6 +115,7 @@
 
 <main>
   <section class="tab active" id="tab-live">
+    <div class="panel crashes" id="crashPanel" role="alert" hidden></div>
     <div class="kpis" id="kpis"></div>
     <div class="grid charts">
       <div class="panel"><h2>Temperature <span class="hint" id="tempHint">°C (Android) · thermal state (iOS)</span></h2><canvas id="chartTemp"></canvas><div class="legend" id="legendTemp"></div></div>
@@ -227,7 +236,7 @@
 
 <script>
 const HISTORY = 120;
-const state = { js: [], native: [], recording: null, recordingSince: 0, sources: new Map(), source: '', sourcePinned: false };
+const state = { js: [], native: [], crashes: [], recording: null, recordingSince: 0, sources: new Map(), source: '', sourcePinned: false };
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const palette = () => ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6'].map(css);
@@ -265,6 +274,29 @@ function addEvent(event) {
   trackSource(event);
   if (event.type === 'js') { state.js.push(event); if (state.js.length > 600) state.js.shift(); }
   if (event.type === 'native') { state.native.push(event); if (state.native.length > 600) state.native.shift(); }
+  if (event.type === 'crash') state.crashes.push(event);
+}
+
+// Why the app ended (crash, ANR, killed for memory…) or what iOS reported about it.
+function crashList(crashes) {
+  return crashes.slice().reverse().map(crash => `
+    <div class="crash${crash.fatal === false ? ' reported' : ''}">
+      <h3>${escapeHtml(crash.reason)}${crash.fatal === false ? ' <span class="muted">(reported, app kept running)</span>' : ''}</h3>
+      <div><span class="when">${new Date(crash.receivedAt).toLocaleTimeString()}</span>${crash.screen ? ` · on <b>${escapeHtml(crash.screen)}</b>` : ''}${crash.memoryMb != null ? ` · ${escapeHtml(crash.memoryMb)} MB` : ''}${crash.signal || crash.thread ? ` · ${escapeHtml([crash.signal, crash.thread].filter(Boolean).join(' on '))}` : ''}</div>
+      ${crash.title ? `<div>${escapeHtml(crash.title)}</div>` : ''}
+      ${crash.detail ? `<div class="muted">${escapeHtml(crash.detail)}</div>` : ''}
+      ${crash.frames?.length ? `<details><summary class="muted">Stack (${crash.frames.length} frames)</summary><pre>${escapeHtml(crash.frames.join('\n'))}</pre></details>` : ''}
+      ${crash.file ? `<div class="muted">${escapeHtml(crash.file)}</div>` : ''}
+    </div>`).join('');
+}
+
+function renderCrashes() {
+  const crashes = viewEvents(state.crashes);
+  const panel = $('crashPanel');
+  panel.hidden = !crashes.length;
+  if (!crashes.length) return;
+  const fatal = crashes.filter(crash => crash.fatal !== false).length;
+  panel.innerHTML = `<h2>${fatal ? `The app ended ${fatal}×` : 'Reports from the system'} <span class="hint">kept in the recording · newest first</span></h2>${crashList(crashes)}`;
 }
 
 // The build `perf` is running; a finished one stays visible for a while.
@@ -292,7 +324,7 @@ const source = new EventSource('/events');
 source.onmessage = message => {
   const event = JSON.parse(message.data);
   if (event.type === 'clear') {
-    state.js = []; state.native = []; state.sources.clear(); state.source = ''; state.sourcePinned = false; renderSources();
+    state.js = []; state.native = []; state.crashes = []; state.sources.clear(); state.source = ''; state.sourcePinned = false; renderSources();
   } else if (event.type === 'auto') {
     renderAuto(event.auto);
     return;
@@ -403,6 +435,7 @@ function average(values) {
 }
 
 function renderLive() {
+  renderCrashes();
   const liveJs = viewEvents(state.js), liveNative = viewEvents(state.native);
   const now = Date.now();
   const lastJs = liveJs.at(-1), lastNative = liveNative.at(-1);
@@ -731,6 +764,7 @@ $('compare').onclick = async () => {
 function renderSummary(summary) {
   const m = summary.meta;
   $('report').innerHTML = `
+    ${summary.crashes?.length ? `<div class="panel crashes"><h2>Crashes and system reports</h2>${crashList(summary.crashes)}</div>` : ''}
     <div class="panel"><h2>${escapeHtml(m.id ?? m.label)} <span class="hint">${escapeHtml(m.platform)} · ${m.durationSec}s · ${m.jsSamples} JS / ${m.nativeSamples} native samples</span></h2>
     <div class="table-wrap">${table([
       { label: 'Screen', key: 'screen' }, { label: 's', key: 'seconds', num: true }, { label: 'Render ms/s', key: 'renderMsPerSec', num: true },

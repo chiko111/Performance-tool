@@ -3,7 +3,8 @@
 Live performance measurement for React Native **Release** builds on iOS and Android. A browser
 dashboard shows FPS, CPU per thread, Hermes and ART GC, memory, long tasks and render time per
 **screen, component and file**, with the React Compiler status of each component, why it
-rendered, network requests, Redux updates and the phone's temperature. Sessions can be recorded
+rendered, network requests, Redux updates, the phone's temperature and why the app ended when it
+crashes or is killed (stack, screen, memory). Sessions can be recorded
 and compared, and an automatic before/after mode replays the same gestures on two builds.
 
 It works with **any React Native project**. The project's settings (entry file, Metro config,

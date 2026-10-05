@@ -374,8 +374,8 @@ build_ios() {
   echo "Probe build installed and launched on $DEVICE_NAME."
   # Lets the dashboard's automatic before/after runs drive this device.
   if server_running; then
-    "$NODE" -e 'console.log(JSON.stringify({ udid: process.argv[1], kind: process.argv[2], bundle: process.argv[3], team: process.argv[4], name: process.argv[5] }))' \
-      "$UDID" "$KIND" "$IOS_BUNDLE" "${TEAM:-}" "$DEVICE_NAME" |
+    "$NODE" -e 'console.log(JSON.stringify({ udid: process.argv[1], kind: process.argv[2], bundle: process.argv[3], team: process.argv[4], name: process.argv[5], executable: process.argv[6] }))' \
+      "$UDID" "$KIND" "$IOS_BUNDLE" "${TEAM:-}" "$DEVICE_NAME" "$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Info.plist" 2>/dev/null || true)" |
       curl -sf -X POST "$DASHBOARD/ios" -H 'Content-Type: application/json' -d @- >/dev/null || true
   fi
 }
