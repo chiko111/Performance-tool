@@ -274,7 +274,7 @@ function addEvent(event) {
   trackSource(event);
   if (event.type === 'js') { state.js.push(event); if (state.js.length > 600) state.js.shift(); }
   if (event.type === 'native') { state.native.push(event); if (state.native.length > 600) state.native.shift(); }
-  if (event.type === 'crash') state.crashes.push(event);
+  if (event.type === 'crash' && !state.crashes.some(crash => crash.id === event.id)) state.crashes.push(event);
 }
 
 // Why the app ended (crash, ANR, killed for memory…) or what iOS reported about it.
@@ -282,7 +282,7 @@ function crashList(crashes) {
   return crashes.slice().reverse().map(crash => `
     <div class="crash${crash.fatal === false ? ' reported' : ''}">
       <h3>${escapeHtml(crash.reason)}${crash.fatal === false ? ' <span class="muted">(reported, app kept running)</span>' : ''}</h3>
-      <div><span class="when">${new Date(crash.receivedAt).toLocaleTimeString()}</span>${crash.screen ? ` · on <b>${escapeHtml(crash.screen)}</b>` : ''}${crash.memoryMb != null ? ` · ${escapeHtml(crash.memoryMb)} MB` : ''}${crash.signal || crash.thread ? ` · ${escapeHtml([crash.signal, crash.thread].filter(Boolean).join(' on '))}` : ''}</div>
+      <div><span class="when">${new Date(crash.receivedAt).toLocaleString()}</span>${crash.source ? ` · ${escapeHtml(crash.source)}` : ''}${crash.screen ? ` · on <b>${escapeHtml(crash.screen)}</b>` : ''}${crash.memoryMb != null ? ` · ${escapeHtml(crash.memoryMb)} MB` : ''}${crash.signal || crash.thread ? ` · ${escapeHtml([crash.signal, crash.thread].filter(Boolean).join(' on '))}` : ''}</div>
       ${crash.title ? `<div>${escapeHtml(crash.title)}</div>` : ''}
       ${crash.detail ? `<div class="muted">${escapeHtml(crash.detail)}</div>` : ''}
       ${crash.frames?.length ? `<details><summary class="muted">Stack (${crash.frames.length} frames)</summary><pre>${escapeHtml(crash.frames.join('\n'))}</pre></details>` : ''}
@@ -290,13 +290,21 @@ function crashList(crashes) {
     </div>`).join('');
 }
 
+// Every crash not dismissed yet, from any device: a crash must not hide because another device
+// is selected or the device came back with a new address.
 function renderCrashes() {
-  const crashes = viewEvents(state.crashes);
+  const crashes = state.crashes;
   const panel = $('crashPanel');
   panel.hidden = !crashes.length;
   if (!crashes.length) return;
   const fatal = crashes.filter(crash => crash.fatal !== false).length;
-  panel.innerHTML = `<h2>${fatal ? `The app ended ${fatal}×` : 'Reports from the system'} <span class="hint">kept in the recording · newest first</span></h2>${crashList(crashes)}`;
+  panel.innerHTML = `<h2>${fatal ? `The app ended ${fatal}×` : 'Reports from the system'} <span class="hint">kept until dismissed and in the recording · newest first</span><span class="spacer"></span><button id="dismissCrashes" title="Hides these reports on every open dashboard; recordings keep them">Dismiss</button></h2>${crashList(crashes)}`;
+  $('dismissCrashes').onclick = () => {
+    const ids = crashes.map(crash => crash.id).filter(Boolean);
+    state.crashes = state.crashes.filter(crash => !ids.includes(crash.id));
+    renderCrashes();
+    fetch('/crashes/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
+  };
 }
 
 // The build `perf` is running; a finished one stays visible for a while.
@@ -324,16 +332,19 @@ const source = new EventSource('/events');
 source.onmessage = message => {
   const event = JSON.parse(message.data);
   if (event.type === 'clear') {
-    state.js = []; state.native = []; state.crashes = []; state.sources.clear(); state.source = ''; state.sourcePinned = false; renderSources();
+    state.js = []; state.native = []; state.sources.clear(); state.source = ''; state.sourcePinned = false; renderSources();
   } else if (event.type === 'auto') {
     renderAuto(event.auto);
     return;
+  } else if (event.type === 'crashes-dismissed') {
+    state.crashes = state.crashes.filter(crash => !event.ids.includes(crash.id));
   } else if (event.type === 'build') {
     renderBuild(event.build);
     return;
   } else if (event.type === 'hello') {
     renderBuild(event.build);
-    event.history.forEach(addEvent);
+    state.crashes = (event.crashes ?? []).slice();
+    event.history.filter(item => item.type !== 'crash').forEach(addEvent);
     setRecording(event.recording);
   } else {
     addEvent(event);
