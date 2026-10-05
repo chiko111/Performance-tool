@@ -32,6 +32,7 @@ function createWindow() {
     commits: 0,
     commitMs: 0,
     slowCommits: [],
+    triggers: new Map(),
     jsFrames: 0,
     longTasks: 0,
     longTaskMs: 0,
@@ -240,6 +241,37 @@ function componentName(fiber) {
   return null;
 }
 
+// The component that scheduled an update, named like the rest of the report: the closest one of
+// ours at or above it (a library hook's state belongs to the component using it), and its screen.
+function describeUpdater(fiber) {
+  let name = null;
+  let screen = null;
+  for (let node = fiber; node; node = node.return) {
+    const nodeName = COMPONENT_TAGS.has(node.tag) ? componentName(node) : null;
+    if (!name && nodeName && ownComponents.has(nodeName)) name = nodeName;
+    const props = node.memoizedProps;
+    if (!screen && props && props.route && typeof props.route.name === 'string' && props.navigation) screen = props.route.name;
+    if (name && screen) break;
+  }
+  return { component: name || componentName(fiber) || '(library)', screen: screen || '(root)' };
+}
+
+// React's profiling build keeps the fibers that scheduled the work of a commit
+// (root.memoizedUpdaters, what React DevTools shows as "what caused this update"). A commit no
+// component of ours rendered in, e.g. a frozen screen woken up again and again, still has them.
+function recordTriggers(root, commitMs) {
+  const updaters = root.memoizedUpdaters;
+  if (!updaters || !updaters.size) return;
+  for (const fiber of updaters) {
+    const { component, screen } = describeUpdater(fiber);
+    const key = screen + '\u0000' + component;
+    const entry = current.triggers.get(key) || { component, screen, commits: 0, ms: 0 };
+    entry.commits += 1;
+    entry.ms += commitMs / updaters.size;
+    current.triggers.set(key, entry);
+  }
+}
+
 function screenName(fiber, inherited) {
   const props = fiber.memoizedProps;
   const route = props && props.route;
@@ -259,6 +291,11 @@ function onCommit(root) {
   const wasProcessed = fiber => !(renderStartTime >= 0) || fiber.actualStartTime >= renderStartTime;
   current.commits += 1;
   current.commitMs += commitMs;
+  try {
+    recordTriggers(root, commitMs);
+  } catch {
+    current.probeErrors = (current.probeErrors || 0) + 1;
+  }
 
   const commitComponents = new Map();
   let commitRenders = 0;
@@ -458,6 +495,10 @@ function snapshot() {
     commits: window.commits,
     commitMs: round(window.commitMs),
     slowCommits: window.slowCommits.slice(0, 10),
+    triggers: [...window.triggers.values()]
+      .sort((a, b) => b.commits - a.commits)
+      .slice(0, 20)
+      .map(entry => ({ ...entry, ms: round(entry.ms) })),
     jsFps: window.jsFrames,
     longTasks: window.longTasks,
     longTaskMs: round(window.longTaskMs),

@@ -143,6 +143,7 @@
       <div class="panel"><h2>Files <span class="hint">self render time</span></h2><div class="table-wrap" id="filesTable"></div></div>
       <div class="panel"><h2>Threads <span class="hint">avg % of one core</span></h2><div class="table-wrap" id="threadsTable"></div></div>
       <div class="panel"><h2>Slow commits <span class="hint">&ge; 16 ms</span></h2><div class="table-wrap" id="commitsTable"></div></div>
+      <div class="panel"><h2>What triggered commits <span class="hint">component that scheduled the update · a screen not in front = a background screen still updating</span></h2><div class="table-wrap" id="triggersTable"></div></div>
       <div class="panel"><h2>Network <span class="hint">requests per endpoint · duplicate = same endpoint in flight or &lt; 1 s ago</span></h2><div class="table-wrap" id="networkTable"></div></div>
       <div class="panel"><h2>Redux <span class="hint">state slices that changed · renders in the commit right after</span></h2><div class="muted" id="reduxTotals"></div><div class="table-wrap" id="reduxTable"></div></div>
       <div class="panel wide"><h2>Not memoized by React Compiler <span class="hint">rendered in this window</span></h2><div class="table-wrap" id="compilerTable"></div></div>
@@ -649,6 +650,23 @@ function renderTables() {
     { label: 'Time', key: 'at' }, { label: 'Screen', key: 'screen' }, { label: 'ms', key: 'ms', num: true },
     { label: 'Top components', key: 'top', render: r => escapeHtml(r.top.map(t => `${t.component} ${fmt(t.ms, 1)}`).join(', ')) }
   ], commits, 'No commits over 16 ms. 👍');
+
+  const triggers = new Map();
+  for (const event of js) {
+    for (const t of event.triggers ?? []) {
+      const key = `${t.screen}\u0000${t.component}`;
+      const total = triggers.get(key) ?? { component: t.component, screen: t.screen, commits: 0, ms: 0 };
+      total.commits += t.commits;
+      total.ms += t.ms;
+      triggers.set(key, total);
+    }
+  }
+  $('triggersTable').innerHTML = table([
+    { label: 'Component', key: 'component' }, { label: 'Screen', key: 'screen' },
+    { label: 'Commits', key: 'commits', num: true }, { label: 'per s', key: 'perSec', num: true, render: r => fmt(r.perSec, 1) },
+    { label: 'ms', key: 'ms', num: true, render: r => fmt(r.ms, 1) }
+  ], [...triggers.values()].map(r => ({ ...r, perSec: r.commits / Math.max(1, js.length) })).sort((a, b) => b.commits - a.commits).slice(0, 30),
+  'No triggers yet (needs a probe build with commit triggers).');
 }
 $('windowSize').onchange = renderTables;
 $('currentScreenOnly').onchange = renderTables;
@@ -801,6 +819,10 @@ function renderSummary(summary) {
       <div class="panel"><h2>Threads</h2><div class="table-wrap">${table([
         { label: 'Thread', key: 'thread' }, { label: 'avg %', key: 'cpuPct', num: true }, { label: 'CPU ms', key: 'cpuMs', num: true }
       ], summary.threads.slice(0, 30), 'None.')}</div></div>
+      <div class="panel"><h2>What triggered commits</h2><div class="table-wrap">${table([
+        { label: 'Component', key: 'component' }, { label: 'Screen', key: 'screen' }, { label: 'Commits', key: 'commits', num: true },
+        { label: 'per s', key: 'commitsPerSec', num: true }, { label: 'ms/s', key: 'msPerSec', num: true }
+      ], summary.triggers ?? [], 'Not recorded.')}</div></div>
       <div class="panel"><h2>Slowest commits</h2><div class="table-wrap">${table([
         { label: 'Screen', key: 'screen' }, { label: 'ms', key: 'ms', num: true },
         { label: 'Top components', key: 'top', render: r => escapeHtml(r.top.map(t => `${t.component} ${fmt(t.ms, 1)}`).join(', ')) }
