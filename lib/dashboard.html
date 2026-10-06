@@ -94,6 +94,9 @@
   <span class="status">Screen: <span class="screen" id="screen">–</span></span>
   <label class="status" for="source">Device</label>
   <select id="source" title="Each running app is a separate source; charts, tables and recordings use only the selected one"><option value="">waiting…</option></select>
+  <label class="status" for="openScreen">Open screen</label>
+  <select id="openScreen" title="Screens the selected app has shown; it navigates there by itself"><option value="">–</option></select>
+  <button id="openScreenGo">Open</button>
   <span class="spacer"></span>
   <label class="status" for="label">Label</label>
   <input id="label" placeholder="home-before" size="16" />
@@ -261,6 +264,7 @@ function renderSources() {
     .map(([source, seen]) => `<option value="${escapeHtml(source)}">${escapeHtml(source)}${now - seen > 10000 ? ' (idle)' : ''}</option>`)
     .join('');
   $('source').value = state.source;
+  renderOpenScreens();
 }
 
 $('source').onchange = () => {
@@ -269,10 +273,36 @@ $('source').onchange = () => {
   scheduleRender();
 };
 
+// Navigation paths each app has reported, by screen, so it can be sent back to any of them.
+const routesBySource = new Map();
+function trackRoute(event) {
+  if (event.type !== 'js' || !event.routePath || !event.screen) return;
+  const routes = routesBySource.get(event.source) ?? new Map();
+  routesBySource.set(event.source, routes);
+  if (routes.has(event.screen)) { routes.set(event.screen, event.routePath); return; }
+  routes.set(event.screen, event.routePath);
+  if (event.source === state.source) renderOpenScreens();
+}
+function renderOpenScreens() {
+  const selected = $('openScreen').value;
+  const screens = [...(routesBySource.get(state.source)?.keys() ?? [])].sort();
+  $('openScreen').innerHTML = screens.length
+    ? screens.map(screen => `<option value="${escapeHtml(screen)}">${escapeHtml(screen)}</option>`).join('')
+    : '<option value="">–</option>';
+  if (screens.includes(selected)) $('openScreen').value = selected;
+}
+$('openScreenGo').onclick = async () => {
+  const path = routesBySource.get(state.source)?.get($('openScreen').value);
+  if (!path) return toast('Open the screen on the device once, then it can be opened from here');
+  const response = await fetch('/navigate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: state.source, path }) });
+  if (!response.ok) return toast((await response.json()).error);
+};
+
 const viewEvents = events => events.filter(event => !event.source || !state.source || event.source === state.source);
 
 function addEvent(event) {
   trackSource(event);
+  trackRoute(event);
   if (event.type === 'js') { state.js.push(event); if (state.js.length > 600) state.js.shift(); }
   if (event.type === 'native') { state.native.push(event); if (state.native.length > 600) state.native.shift(); }
   if (event.type === 'crash' && !state.crashes.some(crash => crash.id === event.id)) state.crashes.push(event);

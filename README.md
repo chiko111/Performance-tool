@@ -104,6 +104,11 @@ bundle id.
 2. Make the change, run `perf ios …` / `perf android` again and record `home-after`.
 3. In **Recordings & compare** pick Before and After and press **Compare**.
 
+**Open screen** (top bar) sends the selected device to any screen it has already shown, so each
+recording can start from the same screen without touching the phone. Scripts can do the same:
+`POST /navigate {"source": "<device as the dashboard lists it>", "path": [{"name": "…"}]}`. The
+source is required, so a command never moves another app that reports to the same server.
+
 The comparison is per screen, per second: render ms/s, long tasks, GC, FPS, drops, CPU per
 thread and memory, plus the components that changed most and their React Compiler status
 (✗ → ✓). Recordings are in `~/perf-results/<date>_<label>/`.
