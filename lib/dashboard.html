@@ -251,21 +251,34 @@ const fmt = (value, digits = 0) => value == null || Number.isNaN(value) ? '–' 
 function trackSource(event) {
   if (!event.source) return;
   const isNew = !state.sources.has(event.source);
+  const wasIdle = isIdle(state.sources.get(event.source));
   state.sources.set(event.source, event.receivedAt);
   const current = state.sources.get(state.source) ?? 0;
   if (!state.source || (!state.sourcePinned && event.receivedAt - current > 5000)) state.source = event.source;
   if (isNew || $('source').value !== state.source) renderSources();
+  else if (wasIdle) updateSourceLabels();
 }
 
+const SOURCE_IDLE_MS = 10000;
+const isIdle = seen => seen != null && Date.now() - seen > SOURCE_IDLE_MS;
+const sourceLabel = (source, seen) => `${source}${isIdle(seen) ? ' (idle)' : ''}`;
+
 function renderSources() {
-  const now = Date.now();
   $('source').innerHTML = [...state.sources.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([source, seen]) => `<option value="${escapeHtml(source)}">${escapeHtml(source)}${now - seen > 10000 ? ' (idle)' : ''}</option>`)
+    .map(([source, seen]) => `<option value="${escapeHtml(source)}">${escapeHtml(sourceLabel(source, seen))}</option>`)
     .join('');
   $('source').value = state.source;
   renderOpenScreens();
 }
+
+// In place, so an open device list is not rebuilt under the pointer.
+function updateSourceLabels() {
+  for (const option of $('source').options) {
+    if (state.sources.has(option.value)) option.textContent = sourceLabel(option.value, state.sources.get(option.value));
+  }
+}
+setInterval(updateSourceLabels, 5000);
 
 $('source').onchange = () => {
   state.source = $('source').value;

@@ -238,11 +238,13 @@ start_server() {
     running_android="$(curl -sf "$DASHBOARD/status" | sed -nE 's/.*"android":"([^"]+)".*/\1/p')"
     if [[ -z "$android_package" || "$running_android" == "$android_package" ]]; then
       echo "Dashboard already running: $DASHBOARD"
+      open "$DASHBOARD"
       return
     fi
     if curl -sf -X POST "$DASHBOARD/android" -H 'Content-Type: application/json' \
       -d "{\"package\":\"$android_package\"}" >/dev/null 2>&1; then
       echo "Dashboard already running: $DASHBOARD (Android sampling switched on for $android_package)"
+      open "$DASHBOARD"
       return
     fi
     # An older perf-tool server without that endpoint: stop it (it saves an active recording) and restart.
