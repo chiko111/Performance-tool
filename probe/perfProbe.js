@@ -594,10 +594,18 @@ function start() {
   started = true;
   installNetworkHook();
 
+  // Timers and frames run on the display's vsync. An idle screen drops to a low refresh rate (down
+  // to 10-24 Hz), and a timer then fires up to a frame late with nothing blocking: that frame is not
+  // counted. The shortest frame of the last second is the display's frame time.
+  let frameMs = 1000 / 60;
+  let shortestFrameMs = Infinity;
+  let lastFrameAt = null;
+  let frameWindowStart = null;
+
   let expected = Date.now() + LAG_INTERVAL_MS;
   setInterval(() => {
     const now = Date.now();
-    const blocked = now - expected;
+    const blocked = Math.max(0, now - expected - frameMs);
     expected = now + LAG_INTERVAL_MS;
     if (blocked > current.maxBlockMs) current.maxBlockMs = blocked;
     if (blocked >= LONG_TASK_MS) {
@@ -606,8 +614,16 @@ function start() {
     }
   }, LAG_INTERVAL_MS);
 
-  const onFrame = () => {
+  const onFrame = time => {
     current.jsFrames += 1;
+    if (lastFrameAt !== null) shortestFrameMs = Math.min(shortestFrameMs, time - lastFrameAt);
+    lastFrameAt = time;
+    frameWindowStart ??= time;
+    if (time - frameWindowStart >= 1000 && Number.isFinite(shortestFrameMs)) {
+      frameMs = shortestFrameMs;
+      shortestFrameMs = Infinity;
+      frameWindowStart = time;
+    }
     requestAnimationFrame(onFrame);
   };
   requestAnimationFrame(onFrame);

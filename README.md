@@ -183,7 +183,8 @@ content that moves on its own (auto-scrolling carousels) when recording a scenar
 
 - **Long task:** the JS thread is busy for ≥ 50 ms without a break. Taps, scrolling, timers and JS
   animations wait meanwhile. **Max JS block** is the longest such freeze. While scrolling the
-  target is 0.
+  target is 0. Timers run on the display's frames, and an idle screen drops to a low refresh rate
+  (10-24 Hz on many phones), so one frame of delay is not counted as blocking.
 - **Render ms/s:** how long React renders per second. The tables show a component's own time,
   without its children. Time spent in `View`, `Text`, `SvgXml` and the like is counted for your
   component that renders them (column *Incl. library*).
@@ -212,7 +213,10 @@ content that moves on its own (auto-scrolling carousels) when recording a scenar
 - **Compiler ✓ memo:** React Compiler memoized the component, as seen at runtime. **✗** means it
   is not memoized; the reason comes from the compiler itself.
 - **UI FPS / UI drops:** frames on the main / UI thread. On Android this counts frames actually
-  drawn, so 0 while idle is normal.
+  drawn, so 0 while idle is normal. A drop on Android is a frame that took more than 16.7 ms to
+  produce (Android vitals' slow frame). Android's own "janky" count is not used: it measures
+  against the app's vsync (8.3 ms at 120 Hz) and marks almost every frame while the screen idles at
+  a low refresh rate.
 - **Hermes GC / heap:** the JS engine's GC. **ART GC** is the Java/Kotlin GC on Android. A heap that
   only grows is a leak.
 - The probe build uses React's profiling renderer, so absolute numbers are a little higher than in

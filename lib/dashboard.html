@@ -154,7 +154,7 @@
     <details class="panel help">
       <summary>How to read the numbers</summary>
       <ul>
-        <li><b>Long task</b>: the JS thread was busy for at least 50 ms without a break (same threshold as the web Long Tasks API). While that happens, taps, scroll callbacks, timers, network responses and JS-driven animations wait. <b>Max JS block</b> is the longest such freeze. Aim for 0 long tasks while scrolling.</li>
+        <li><b>Long task</b>: the JS thread was busy for at least 50 ms without a break (same threshold as the web Long Tasks API). While that happens, taps, scroll callbacks, timers, network responses and JS-driven animations wait. <b>Max JS block</b> is the longest such freeze. Aim for 0 long tasks while scrolling. Timers run on the display's frames and an idle screen drops to 10-24 Hz, so one frame of delay is not counted.</li>
         <li><b>Render ms/s</b>: time React spent rendering components per second. <b>Components / Files</b> show self time, without children. Time of library components (View, Text, SvgXml…) is charged to the closest component of ours that renders them; <b>Incl. library</b> shows which ones.</li>
         <li><b>Why</b>: what changed for the component compared with its previous render — <i>props: name</i>, <i>state</i>, <i>store (useSelector)</i>, <i>context: Provider</i>. <b>parent rendered (props equal)</b> means nothing it receives changed: it re-rendered only because its parent did and it is not memoized.</li>
         <li><b>Compiler ✓ memo</b>: React Compiler memoized the component; at runtime the probe saw useMemoCache on it. <b>✗ error/class/skipped</b>: not memoized, and the reason comes from the compiler itself. Many renders with no prop changes and ✗ is the first thing to fix.</li>
