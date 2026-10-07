@@ -3,7 +3,7 @@
 Live performance measurement for React Native **Release** builds on iOS and Android. A browser
 dashboard shows FPS, CPU per thread, Hermes and ART GC, memory, long tasks and render time per
 **screen, component and file**, with the React Compiler status of each component, why it
-rendered, network requests, Redux updates, the phone's temperature and why the app ended when it
+rendered, network requests, WebSocket messages per STOMP topic, Redux updates, the phone's temperature and why the app ended when it
 crashes or is killed (stack, screen, memory). Sessions can be recorded
 and compared, and an automatic before/after mode replays the same gestures on two builds.
 
@@ -198,6 +198,11 @@ content that moves on its own (auto-scrolling carousels) when recording a scenar
 - **Network:** requests (fetch / axios / XMLHttpRequest) per endpoint, with ids in the path and
   query values folded together. A **duplicate** is a request to the exact same URL that is still
   loading or finished less than 1 s ago.
+- **WebSocket:** messages received per socket and, for STOMP, per destination (topic), with ids
+  in the URL and topic folded. *Renders after* are the components rendered in the commit right
+  after a message, so a topic that keeps a screen re-rendering stands out. Opens, closes (with
+  close codes) and errors per socket show reconnects. Only the STOMP command and destination are
+  read: tokens, other headers and message bodies are not recorded.
 - **Redux:**
   - *dispatches/s* and how many of them **changed nothing**. Those still run every useSelector.
   - *State slices*: which parts of the state change and how many components render in the commit

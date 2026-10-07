@@ -38,6 +38,8 @@ function createWindow() {
     longTaskMs: 0,
     maxBlockMs: 0,
     network: new Map(),
+    sockets: new Map(),
+    socketConnections: new Map(),
     actions: new Map(),
     store: { dispatches: 0, noops: 0, slices: new Map() }
   };
@@ -211,6 +213,171 @@ function installNetworkHook() {
   };
 }
 
+// ---------- WebSocket ----------
+// Messages are counted per socket and, for STOMP, per destination (topic): the SUBSCRIBE frames the
+// app sends map a subscription id to its destination, and every MESSAGE frame is charged to it. Ids
+// in the URL and the destination are folded like endpoints. Only the command and the destination /
+// subscription headers are read: header values such as auth tokens and bodies are never kept.
+
+const NON_STOMP_TOPIC = '(messages)';
+const MAX_HEADER_CHARS = 512;
+let topicsSinceCommit = new Set();
+let lastSocketMessageAt = 0;
+
+function foldPath(path) {
+  return path
+    .split('/')
+    .map(part => (/^\d+$|^[0-9a-f-]{16,}$|^[0-9a-f]{24}$/i.test(part) ? ':id' : part))
+    .join('/');
+}
+
+function socketKey(url) {
+  const match = String(url).match(/^(?:wss?:\/\/)?([^/?#]*)([^?#]*)/);
+  return match ? `${match[1]}${foldPath(match[2])}` : String(url);
+}
+
+function dataText(data) {
+  if (typeof data === 'string') return data.slice(0, MAX_HEADER_CHARS);
+  if (data && typeof data.byteLength === 'number' && typeof TextDecoder !== 'undefined') {
+    try {
+      const view = data instanceof ArrayBuffer ? new Uint8Array(data, 0, Math.min(data.byteLength, MAX_HEADER_CHARS)) : data;
+      return new TextDecoder().decode(view).slice(0, MAX_HEADER_CHARS);
+    } catch {
+      return '';
+    }
+  }
+  return '';
+}
+
+function dataBytes(data) {
+  if (typeof data === 'string') return data.length;
+  return (data && (data.byteLength ?? data.size)) || 0;
+}
+
+// One WebSocket message can carry several STOMP frames (separated by NUL) and heartbeats (bare
+// newlines). Returns [{ command, headers }] or null when the data is not STOMP.
+const STOMP_COMMANDS = new Set(['CONNECT', 'STOMP', 'CONNECTED', 'SEND', 'SUBSCRIBE', 'UNSUBSCRIBE', 'MESSAGE', 'RECEIPT', 'ERROR', 'ACK', 'NACK', 'BEGIN', 'COMMIT', 'ABORT', 'DISCONNECT']);
+
+function stompFrames(text) {
+  const frames = [];
+  for (const raw of text.split('\0')) {
+    const frame = raw.replace(/^[\r\n]+/, '');
+    if (!frame) continue;
+    const lines = frame.split(/\r?\n/);
+    if (!STOMP_COMMANDS.has(lines[0])) return frames.length ? frames : null;
+    const headers = {};
+    for (let index = 1; index < lines.length && lines[index]; index += 1) {
+      const separator = lines[index].indexOf(':');
+      const name = lines[index].slice(0, separator);
+      if (name === 'destination' || name === 'subscription' || name === 'id') headers[name] ??= lines[index].slice(separator + 1);
+    }
+    frames.push({ command: lines[0], headers });
+  }
+  return frames;
+}
+
+function socketEntry(socket, topic) {
+  const key = `${socket}\u0000${topic}`;
+  let entry = current.sockets.get(key);
+  if (!entry) {
+    entry = { socket, topic, messages: 0, bytes: 0, sent: 0, sentBytes: 0, commits: 0, renders: 0, renderMs: 0 };
+    current.sockets.set(key, entry);
+  }
+  return entry;
+}
+
+function connectionEntry(socket) {
+  let entry = current.socketConnections.get(socket);
+  if (!entry) {
+    entry = { socket, opens: 0, closes: 0, errors: 0, closeCodes: {} };
+    current.socketConnections.set(socket, entry);
+  }
+  return entry;
+}
+
+function trackSocket(webSocket, url) {
+  const socket = socketKey(url);
+  const subscriptions = new Map(); // STOMP subscription id -> folded destination
+  const topicOf = frame => {
+    const destination = frame.headers.destination ?? subscriptions.get(frame.headers.subscription);
+    return destination ? foldPath(destination) : `(${frame.command.toLowerCase()})`;
+  };
+
+  webSocket.addEventListener('open', () => {
+    connectionEntry(socket).opens += 1;
+  });
+  webSocket.addEventListener('error', () => {
+    connectionEntry(socket).errors += 1;
+  });
+  webSocket.addEventListener('close', event => {
+    const entry = connectionEntry(socket);
+    entry.closes += 1;
+    const code = String(event?.code ?? '?');
+    entry.closeCodes[code] = (entry.closeCodes[code] || 0) + 1;
+  });
+  webSocket.addEventListener('message', event => {
+    try {
+      const bytes = dataBytes(event.data);
+      const frames = stompFrames(dataText(event.data));
+      const topics = frames ? frames.filter(frame => frame.command === 'MESSAGE').map(topicOf) : [NON_STOMP_TOPIC];
+      if (!topics.length) return; // heartbeats, CONNECTED, RECEIPT
+      for (const topic of topics) {
+        const entry = socketEntry(socket, topic);
+        entry.messages += 1;
+        entry.bytes += bytes / topics.length;
+        topicsSinceCommit.add(`${socket}\u0000${topic}`);
+      }
+      lastSocketMessageAt = Date.now();
+    } catch {
+      current.probeErrors = (current.probeErrors || 0) + 1;
+    }
+  });
+
+  const send = webSocket.send;
+  webSocket.send = function (data) {
+    try {
+      const frames = stompFrames(dataText(data));
+      if (frames) {
+        for (const frame of frames) {
+          if (frame.command === 'SUBSCRIBE' && frame.headers.id && frame.headers.destination) {
+            subscriptions.set(frame.headers.id, frame.headers.destination);
+          }
+          if (frame.command === 'SEND') {
+            const entry = socketEntry(socket, topicOf(frame));
+            entry.sent += 1;
+            entry.sentBytes += dataBytes(data) / frames.length;
+          }
+        }
+      } else {
+        const entry = socketEntry(socket, NON_STOMP_TOPIC);
+        entry.sent += 1;
+        entry.sentBytes += dataBytes(data);
+      }
+    } catch {
+      current.probeErrors = (current.probeErrors || 0) + 1;
+    }
+    return send.call(this, data);
+  };
+}
+
+// Replaced before the app's code runs, so every socket the app opens goes through it.
+function installSocketHook() {
+  const NativeWebSocket = global.WebSocket;
+  if (!NativeWebSocket || NativeWebSocket.__perfProbe) return;
+  class PerfWebSocket extends NativeWebSocket {
+    constructor(url, ...rest) {
+      super(url, ...rest);
+      try {
+        if (!String(url).includes(`:${PORT}/`)) trackSocket(this, url);
+      } catch {
+        current.probeErrors = (current.probeErrors || 0) + 1;
+      }
+    }
+  }
+  PerfWebSocket.__perfProbe = true;
+  global.WebSocket = PerfWebSocket;
+}
+
 // React's own fibers have no component name; labelled so their time shows up in the breakdown.
 const REACT_FIBER_NAMES = {
   4: 'Portal',
@@ -380,6 +547,20 @@ function onCommit(root) {
     slicesSinceCommit = new Set();
   }
 
+  // The same for a commit right after socket messages: charged to their topics.
+  if (topicsSinceCommit.size) {
+    if (Date.now() - lastSocketMessageAt < 100 + commitMs) {
+      for (const key of topicsSinceCommit) {
+        const [socket, topic] = key.split('\u0000');
+        const entry = socketEntry(socket, topic);
+        entry.commits += 1;
+        entry.renders += commitRenders / topicsSinceCommit.size;
+        entry.renderMs += commitMs / topicsSinceCommit.size;
+      }
+    }
+    topicsSinceCommit = new Set();
+  }
+
   if (commitMs >= 16) {
     current.slowCommits.push({
       ms: round(commitMs),
@@ -523,6 +704,11 @@ function snapshot() {
       .sort((a, b) => b.count - a.count)
       .slice(0, 40)
       .map(entry => ({ ...entry, ms: round(entry.ms) })),
+    sockets: [...window.sockets.values()]
+      .sort((a, b) => b.messages - a.messages)
+      .slice(0, 40)
+      .map(entry => ({ ...entry, bytes: Math.round(entry.bytes), sentBytes: Math.round(entry.sentBytes), renders: round(entry.renders), renderMs: round(entry.renderMs) })),
+    socketConnections: [...window.socketConnections.values()],
     redux: {
       dispatches: window.store.dispatches,
       noops: window.store.noops,
@@ -632,3 +818,4 @@ function start() {
 }
 
 installHook();
+installSocketHook();

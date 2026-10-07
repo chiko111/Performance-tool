@@ -148,6 +148,7 @@
       <div class="panel"><h2>Slow commits <span class="hint">&ge; 16 ms</span></h2><div class="table-wrap" id="commitsTable"></div></div>
       <div class="panel"><h2>What triggered commits <span class="hint">component that scheduled the update · a screen not in front = a background screen still updating</span></h2><div class="table-wrap" id="triggersTable"></div></div>
       <div class="panel"><h2>Network <span class="hint">requests per endpoint · duplicate = same endpoint in flight or &lt; 1 s ago</span></h2><div class="table-wrap" id="networkTable"></div></div>
+      <div class="panel"><h2>WebSocket <span class="hint">messages per STOMP topic · renders in the commit right after</span></h2><div class="muted" id="socketTotals"></div><div class="table-wrap" id="socketTable"></div></div>
       <div class="panel"><h2>Redux <span class="hint">state slices that changed · renders in the commit right after</span></h2><div class="muted" id="reduxTotals"></div><div class="table-wrap" id="reduxTable"></div></div>
       <div class="panel wide"><h2>Not memoized by React Compiler <span class="hint">rendered in this window</span></h2><div class="table-wrap" id="compilerTable"></div></div>
     </div>
@@ -159,6 +160,7 @@
         <li><b>Why</b>: what changed for the component compared with its previous render — <i>props: name</i>, <i>state</i>, <i>store (useSelector)</i>, <i>context: Provider</i>. <b>parent rendered (props equal)</b> means nothing it receives changed: it re-rendered only because its parent did and it is not memoized.</li>
         <li><b>Compiler ✓ memo</b>: React Compiler memoized the component; at runtime the probe saw useMemoCache on it. <b>✗ error/class/skipped</b>: not memoized, and the reason comes from the compiler itself. Many renders with no prop changes and ✗ is the first thing to fix.</li>
         <li><b>JS FPS / UI FPS</b>: frames the JS / main thread delivered. On Android the UI value is the number of frames actually drawn (0 when idle is normal).</li>
+        <li><b>WebSocket</b>: messages the app received per socket and, for STOMP, per destination (topic); ids in the URL and topic are folded. <b>Renders after</b> are components rendered in the commit right after a message (within 100 ms), split between the topics that arrived before it: a topic with many renders per second is one that keeps the screen re-rendering. The line above the table shows how often each socket opened and closed (reconnects) and with which close codes.</li>
         <li><b>Hermes GC</b>: garbage-collector CPU time and heap of the JS engine. <b>ART GC</b> (Android): Java/Kotlin garbage collector. A rising heap that never drops means a leak.</li>
         <li>The probe build uses React's profiling renderer, so absolute numbers are a little higher than in the store build. Compare <i>probe build vs probe build</i> (before/after).</li>
       </ul>
@@ -603,6 +605,20 @@ const NETWORK_COLUMNS = seconds => [
   { label: 'Duplicates', key: 'duplicates', num: true, render: r => r.duplicates ? `<span class="up">${r.duplicates}</span>` : '0' },
   { label: 'Errors', key: 'errors', num: true, render: r => r.errors ? `<span class="up">${r.errors}</span>` : '0' }
 ];
+const SOCKET_COLUMNS = seconds => [
+  { label: 'Socket', key: 'socket', cls: 'file' }, { label: 'Topic', key: 'topic', cls: 'file' },
+  { label: 'Messages', key: 'messages', num: true },
+  { label: 'per s', key: 'perSec', num: true, render: r => fmt(r.perSec ?? r.messages / seconds, 2) },
+  { label: 'KB', key: 'kb', num: true, render: r => fmt(r.kb, 1) },
+  { label: 'Sent', key: 'sent', num: true },
+  { label: 'Renders after', key: 'renders', num: true, render: r => fmt(r.renders) },
+  { label: 'Renders/s', key: 'rendersPerSec', num: true, render: r => fmt(r.rendersPerSec ?? r.renders / seconds, 1) }
+];
+function socketConnectionText(connections) {
+  return connections
+    .map(c => `${c.socket}: ${c.opens} opened · ${c.closes} closed${Object.keys(c.closeCodes ?? {}).length ? ` (codes ${Object.entries(c.closeCodes).map(([code, count]) => `${code}×${count}`).join(', ')})` : ''}${c.errors ? ` · ${c.errors} errors` : ''}`)
+    .join(' — ');
+}
 const SLICE_COLUMNS = seconds => [
   { label: 'Slice', key: 'slice' }, { label: 'Updates', key: 'updates', num: true },
   { label: 'per s', key: 'perSec', num: true, render: r => fmt(r.perSec ?? r.updates / seconds, 2) },
@@ -648,8 +664,22 @@ function renderTables() {
   ], [...components.values()].sort((a, b) => b.ms - a.ms).slice(0, 40), 'Waiting for the probe… open a screen in the app.');
 
   const network = new Map();
+  const sockets = new Map();
+  const socketConnections = new Map();
   const redux = { dispatches: 0, noops: 0, slices: new Map() };
   for (const event of js) {
+    for (const s of event.sockets ?? []) {
+      const key = `${s.socket}\u0000${s.topic}`;
+      const row = sockets.get(key) ?? { socket: s.socket, topic: s.topic, messages: 0, kb: 0, sent: 0, renders: 0 };
+      row.messages += s.messages; row.kb += s.bytes / 1024; row.sent += s.sent; row.renders += s.renders;
+      sockets.set(key, row);
+    }
+    for (const c of event.socketConnections ?? []) {
+      const row = socketConnections.get(c.socket) ?? { socket: c.socket, opens: 0, closes: 0, errors: 0, closeCodes: {} };
+      row.opens += c.opens; row.closes += c.closes; row.errors += c.errors;
+      for (const [code, count] of Object.entries(c.closeCodes ?? {})) row.closeCodes[code] = (row.closeCodes[code] ?? 0) + count;
+      socketConnections.set(c.socket, row);
+    }
     for (const n of event.network ?? []) {
       const row = network.get(n.key) ?? { key: n.key, count: 0, ms: 0, maxMs: 0, kb: 0, duplicates: 0, errors: 0 };
       row.count += n.count; row.ms += n.ms; row.maxMs = Math.max(row.maxMs, n.maxMs); row.kb += n.bytes / 1024; row.duplicates += n.duplicates; row.errors += n.errors;
@@ -666,6 +696,8 @@ function renderTables() {
   }
   const windowSeconds = Math.max(1, js.length);
   $('networkTable').innerHTML = table(NETWORK_COLUMNS(windowSeconds), [...network.values()].sort((a, b) => b.count - a.count).slice(0, 30), 'No requests in this window (or a probe build from an older perf-tool).');
+  $('socketTotals').textContent = socketConnectionText([...socketConnections.values()]);
+  $('socketTable').innerHTML = table(SOCKET_COLUMNS(windowSeconds), [...sockets.values()].sort((a, b) => b.messages - a.messages).slice(0, 30), 'No socket messages in this window (or a probe build from an older perf-tool).');
   $('reduxTotals').textContent = js.some(e => e.redux)
     ? `${fmt(redux.dispatches / windowSeconds, 1)} dispatches/s · ${fmt(redux.noops / windowSeconds, 1)}/s changed nothing`
     : 'No Redux data (store not found yet, or a probe build from an older perf-tool).';
@@ -855,6 +887,7 @@ function renderSummary(summary) {
         { label: 'Incl. library', key: 'library', cls: 'file', render: r => libraryList(r.library) }, { label: 'File', key: 'file', cls: 'file' }
       ], summary.components.slice(0, 80), 'None.')}</div></div>
       <div class="panel"><h2>Network</h2><div class="table-wrap">${table(NETWORK_COLUMNS(1), summary.network ?? [], 'No requests recorded.')}</div></div>
+      <div class="panel"><h2>WebSocket <span class="hint">${escapeHtml(socketConnectionText(summary.socketConnections ?? []))}</span></h2><div class="table-wrap">${table(SOCKET_COLUMNS(1), summary.sockets ?? [], 'No socket messages recorded.')}</div></div>
       <div class="panel"><h2>Redux <span class="hint">${summary.redux ? `${summary.redux.dispatchesPerSec} dispatches/s · ${summary.redux.noopsPerSec}/s changed nothing` : 'no data'}</span></h2><div class="table-wrap">${table(SLICE_COLUMNS(1), summary.redux?.slices ?? [], 'No state changes recorded.')}</div></div>
       <div class="panel"><h2>Files</h2><div class="table-wrap">${table([
         { label: 'File', key: 'file', cls: 'file' }, { label: 'ms', key: 'selfMs', num: true }, { label: 'Renders', key: 'renders', num: true }
@@ -908,6 +941,12 @@ function renderCompare(result, target = 'report') {
         { label: 'Duplicates', key: 'after_duplicates', num: true, render: r => pairCell(r.before_duplicates, r.after_duplicates) },
         { label: 'Errors', key: 'after_errors', num: true, render: r => pairCell(r.before_errors, r.after_errors) }
       ], result.network ?? [], 'No requests.')}</div></div>
+      <div class="panel"><h2>WebSocket <span class="hint">messages per second per topic</span></h2><div class="table-wrap">${table([
+        { label: 'Socket · topic', key: 'key', cls: 'file' },
+        { label: 'per s', key: 'after_perSec', num: true, render: r => pairCell(r.before_perSec, r.after_perSec) },
+        { label: 'KB', key: 'after_kb', num: true, render: r => pairCell(r.before_kb, r.after_kb) },
+        { label: 'Renders/s after it', key: 'after_rendersPerSec', num: true, render: r => pairCell(r.before_rendersPerSec, r.after_rendersPerSec) }
+      ], result.sockets ?? [], 'No socket messages.')}</div></div>
       <div class="panel"><h2>Redux <span class="hint">${result.store ? `dispatches/s ${result.store.dispatchesPerSec.before ?? '–'} → ${result.store.dispatchesPerSec.after ?? '–'} · changed nothing ${result.store.noopsPerSec.before ?? '–'} → ${result.store.noopsPerSec.after ?? '–'}` : ''}</span></h2><div class="table-wrap">${table([
         { label: 'Slice', key: 'slice' },
         { label: 'Updates/s', key: 'after_perSec', num: true, render: r => pairCell(r.before_perSec, r.after_perSec) },
