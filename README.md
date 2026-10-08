@@ -1,13 +1,19 @@
 # perf-tool
 
-Live performance measurement for React Native **Release** builds on iOS and Android. A browser
+Live performance measurement for React Native **Release** builds on iOS and Android, and for
+**React web apps** (`perf web`: production build in any browser — desktop, iPhone, Android). A browser
 dashboard shows FPS, CPU per thread, Hermes and ART GC, memory, long tasks and render time per
 **screen, component and file**, with the React Compiler status of each component, why it
 rendered, network requests, WebSocket messages per STOMP topic, Redux updates, the phone's temperature and why the app ended when it
 crashes or is killed (stack, screen, memory). Sessions can be recorded
 and compared, and an automatic before/after mode replays the same gestures on two builds.
 
-It works with **any React Native project**. The project's settings (entry file, Metro config,
+Two more tabs work for both: **Memory leaks** (listeners, timers, observers and subscriptions a
+component left behind, with the file and line) and **Code health** (a static check of the code:
+leaks in effects, Redux selectors, circular imports, CSS / Sass, outdated or vulnerable packages).
+
+It works with **any React Native project** and any React web app built with webpack, Vite or
+Create React App. The project's settings (entry file, Metro config,
 env handling, iOS schemes, bundle ids and teams, Android flavors) are detected by a scan and
 stored outside the project in `~/.config/perf-tool/projects.json`. A project can have one domain
 or several (brands / white labels built from one codebase).
@@ -112,6 +118,64 @@ The phone must be on the same network as the Mac; the server reconnects when the
 drops. After a phone restart adb over TCP is off again: connect the cable once (or use Wireless
 debugging). `perf android <serial or address>` skips the list; `--cable` keeps the old cable-only
 behaviour.
+
+## React web apps: `perf web`
+
+```sh
+perf web                          # this Mac: production build + probe, Chrome and the dashboard
+perf web --variant efbet-pre_prod # a chosen variant (domain / environment)
+perf web android                  # also opens it in Chrome on the Android phone connected by USB
+perf web none                     # build and serve only; open it yourself (Safari, any phone)
+```
+
+The project is set up like a React Native one: the setup page (or the first `perf web`) scans it —
+the bundler (webpack, Vite, Create React App), its config file, the app's port and one **variant
+per environment** the CI jobs or `package.json` scripts build (e.g. `SITE_ID=EFBET` +
+`REACT_APP_ENV=pre_prod` → variant `efbet-pre_prod`). The setup page shows each variant's
+environment for editing and which one is the **Default** (built without `--variant`); it also has
+**Start perf web**, so no Terminal is needed. Run outside a project, `perf web` opens the dashboard
+with a list of the saved projects and their variants to start from.
+
+What it does:
+1. builds a **production** build with the project's own config, wrapped outside the project:
+   the probe first in `<head>`, React DOM's profiling build, readable component names, source maps,
+   its own output folder and webpack cache (`~/Library/Caches/perf-tool/<project>/`);
+2. serves it on the app's port with the project's own dev-server settings (proxy, history
+   fallback) — webpack-dev-server or `vite preview` — and prints the address for phones on the
+   same Wi-Fi;
+3. opens Chrome with its own profile (or Chrome on the USB phone) and the dashboard.
+
+In **any browser** the probe reports what rendered and why (props, state, `useSelector`, context,
+parent), commit triggers, long tasks, frames, forced synchronous layouts (with file and line),
+layout shifts, interactions (INP), network, WebSocket / STOMP, Redux and leaks. With **Chrome or
+Edge** (desktop or Android over USB) the dashboard adds CPU per thread, layout and style time, V8
+garbage collection, JS heap, DOM nodes and event listeners over the DevTools protocol, the scripts
+behind slow frames, and the leak growth test and detached DOM. **Stop perf web** on the dashboard
+(or Ctrl-C) stops everything; webpack rebuilds when a source file changes (reload the page).
+
+## Memory leaks
+
+The probe (web and React Native) wraps what keeps something alive until it is undone: event
+listeners (web), React Native emitters (Keyboard, AppState, Dimensions, BackHandler, Linking…),
+intervals, long timeouts, animation-frame loops, observers, sockets and `store.subscribe`. Each is
+charged to the component whose effect created it. When that component unmounts and its cleanup
+has not undone it, the tab lists it with the component, what it is and the file and line it was
+created at (web: through the source maps). It also catches `removeEventListener` called with
+another function (an inline arrow, `.bind`) than the one added. With Chrome: **growth test** opens a
+screen and goes back N times with a garbage collection each round and shows what keeps growing
+(heap, DOM nodes, listeners, constructors), and **Find detached DOM** shows elements that left the
+page but stay in memory, with what keeps them.
+
+## Code health
+
+`perf health` or the **Code health** tab: a static check of the project's sources (no device):
+leaks in effects (listeners, intervals, subscriptions, observers without cleanup, cleanups that a
+`useMount`-style wrapper drops), Redux selectors that return a new object or array on every call,
+inline context values in components React Compiler does not memoize, circular imports, CSS
+modules with missing or unused classes, Sass deprecations, layout-triggering animations,
+hard-coded colours, outdated / deprecated / vulnerable / duplicated / unused packages and heavy
+assets. Every finding has the file, line, what it causes and what to do; **Copy as text** gives
+it as Markdown.
 
 ## Record and compare before / after
 
@@ -261,6 +325,8 @@ content that moves on its own (auto-scrolling carousels) when recording a scenar
 perf init                    # setup page: scan, review and edit the settings
 perf ios ["<device>"] [--variant <domain>]   # server + build + install + dashboard (iOS)
 perf android [serial] [--variant <domain>]   # server + build + install + dashboard (Android)
+perf web [chrome|android|none] [--variant <v>] [--port N]   # React web app: build + serve + dashboard
+perf health [--json]         # Code health report (static check of the sources)
 perf ios "<…>" --no-server   # build and install only
 perf setup [--remove]        # add / remove the yarn perf:* scripts in package.json
 perf devices                 # iOS devices / simulators and Android devices
@@ -281,6 +347,7 @@ perf clean                   # remove generated files and probe build caches
 | iOS build cache | a separate DerivedData in `~/Library/Caches/perf-tool/` (the normal cache is not touched) |
 | Android | `./gradlew -I .generated/<project>/init.gradle`; threads, GC and frames are read over adb |
 | Project settings | `~/.config/perf-tool/projects.json` (pasted env files: `~/.config/perf-tool/env/`) |
+| Web (perf web) | a generated webpack / Vite config in `.generated/<project>/` wraps the project's own; output and webpack cache in `~/Library/Caches/perf-tool/<project>/`; the probe is served as `/__perf/probe.js` and injected into the HTML of the probe build only |
 
 ## Troubleshooting
 

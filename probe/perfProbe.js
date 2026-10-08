@@ -8,6 +8,7 @@
 const hosts = require('./hosts.json');
 const build = require('./build.json');
 const ownComponents = new Set(require('./components.json'));
+const { createLeakTracker } = require('./leakTracker');
 
 const PORT = 8099;
 const FLUSH_MS = 1000;
@@ -24,6 +25,8 @@ const sessionId = `${Date.now().toString(36)}${Math.random().toString(36).slice(
 let endpoint = null;
 let current = createWindow();
 const pending = [];
+// Listeners, timers and subscriptions per component, for the Memory leaks tab (probe/leakTracker.js).
+const tracker = createLeakTracker({ ownComponents });
 
 function createWindow() {
   return {
@@ -134,6 +137,8 @@ function attachStore(store) {
     previous = next;
     lastStoreUpdateAt = Date.now();
   });
+  // After the probe's own subscription, so only the app's subscribe calls are followed.
+  tracker.wrapSubscribe(store, 'subscribe', 'Redux store');
   const dispatch = store.dispatch;
   store.dispatch = function (action, ...rest) {
     const type = typeof action === 'function' ? '(thunk)' : String((action && action.type) || '(unknown)');
@@ -838,6 +843,11 @@ function installHook() {
       safeCommit(args[1]);
       return original && original.apply(this, args);
     };
+    const originalUnmount = existing.onCommitFiberUnmount;
+    existing.onCommitFiberUnmount = function (...args) {
+      safeUnmount(args[1]);
+      return originalUnmount && originalUnmount.apply(this, args);
+    };
     return;
   }
   let nextRendererId = 0;
@@ -854,17 +864,61 @@ function installHook() {
     onCommitFiberRoot(_rendererId, root) {
       safeCommit(root);
     },
-    onCommitFiberUnmount() {},
+    onCommitFiberUnmount(_rendererId, fiber) {
+      safeUnmount(fiber);
+    },
     onPostCommitFiberRoot() {},
     checkDCE() {}
   };
 }
 
 function safeCommit(root) {
+  // React Native's renderers have no profiling hooks for effects: the commit's pending useEffect
+  // callbacks are wrapped so whatever they set up is attributed to their component.
+  try {
+    tracker.wrapPendingEffects(root.current);
+  } catch (error) {
+    current.probeErrors = (current.probeErrors || 0) + 1;
+  }
   try {
     onCommit(root);
   } catch (error) {
     current.probeErrors = (current.probeErrors || 0) + 1;
+  }
+}
+
+function safeUnmount(fiber) {
+  try {
+    tracker.fiberUnmounted(fiber);
+  } catch (error) {
+    current.probeErrors = (current.probeErrors || 0) + 1;
+  }
+}
+
+// Core modules whose listeners keep a component alive until removed.
+function installNativeTracking() {
+  const ReactNative = require('react-native');
+  const emitters = [
+    ['Keyboard', 'addListener'],
+    ['AppState', 'addEventListener'],
+    ['Dimensions', 'addEventListener'],
+    ['BackHandler', 'addEventListener'],
+    ['Linking', 'addEventListener'],
+    ['AccessibilityInfo', 'addEventListener'],
+    ['Appearance', 'addChangeListener'],
+    ['DeviceEventEmitter', 'addListener']
+  ];
+  for (const [name, method] of emitters) {
+    try {
+      tracker.wrapEmitter(ReactNative[name], method, name);
+    } catch {
+      // a module this React Native version does not have
+    }
+  }
+  try {
+    tracker.wrapEmitter(ReactNative.NativeEventEmitter && ReactNative.NativeEventEmitter.prototype, 'addListener', 'NativeEventEmitter');
+  } catch {
+    // older React Native
   }
 }
 
@@ -923,6 +977,7 @@ function hermesStats() {
 function snapshot() {
   const window = current;
   current = createWindow();
+  tracker.tick();
   return {
     t: Date.now(),
     screen: currentRoute(),
@@ -974,6 +1029,7 @@ function snapshot() {
         .filter(entry => entry.type.startsWith('slice:'))
         .map(entry => ({ slice: entry.type.slice(6), commits: entry.commits, renders: round(entry.renders), renderMs: round(entry.renderMs) }))
     },
+    leaks: tracker.snapshot(),
     probeErrors: window.probeErrors || 0
   };
 }
@@ -1048,6 +1104,11 @@ function start() {
   if (started) return;
   started = true;
   installNetworkHook();
+  try {
+    installNativeTracking();
+  } catch {
+    current.probeErrors = (current.probeErrors || 0) + 1;
+  }
 
   // Timers and frames run on the display's vsync. An idle screen drops to a low refresh rate (down
   // to 10-24 Hz), and a timer then fires up to a frame late with nothing blocking: that frame is not
@@ -1058,7 +1119,7 @@ function start() {
   let frameWindowStart = null;
 
   let expected = Date.now() + LAG_INTERVAL_MS;
-  setInterval(() => {
+  rawSetInterval(() => {
     const now = Date.now();
     const blocked = Math.max(0, now - expected - frameMs);
     expected = now + LAG_INTERVAL_MS;
@@ -1083,8 +1144,16 @@ function start() {
   };
   requestAnimationFrame(onFrame);
 
-  setInterval(flush, FLUSH_MS);
+  rawSetInterval(flush, FLUSH_MS);
 }
 
+// Timers are wrapped now (InitializeCore has set them up before the entry module), so the first
+// screen's effects are followed too; the probe's own intervals keep the originals.
+const rawSetInterval = global.setInterval;
+try {
+  tracker.installTimers(global);
+} catch {
+  current.probeErrors = (current.probeErrors || 0) + 1;
+}
 installHook();
 installSocketHook();

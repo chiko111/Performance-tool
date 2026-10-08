@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Live performance tooling for React Native release builds. Lives outside the project:
-# a probe build is assembled from this folder on request and leaves the project untouched.
+# Live performance tooling for React Native release builds and React web apps. Lives outside the
+# project: a probe build is assembled from this folder on request and leaves the project untouched.
 #
 # Run from inside the project (or set PERF_REPO=/path/to/project). The project's settings come
 # from the setup page (perf init / the Perf Tool app), saved in ~/.config/perf-tool/projects.json.
@@ -13,6 +13,12 @@
 #                                        Server + Android release with probe + install + dashboard,
 #                                        over adb on Wi-Fi (no serial: pick from a list; a phone on
 #                                        the cable is switched to Wi-Fi unless --cable)
+#   perf web [chrome|android|none] [--variant <name>] [--port N]
+#                                        React web app: production build + probe on the app's port,
+#                                        dashboard, and Chrome on this Mac (android: Chrome on the phone
+#                                        connected by USB; none: open it yourself — Safari, a phone on the
+#                                        same Wi-Fi). Outside a project the dashboard asks for one.
+#   perf health [--json]                 Code health: leaks, selectors, circular imports, CSS, packages
 #   perf setup [--remove]                Add (or remove) the yarn perf:* scripts in package.json
 #   perf devices                         List iOS devices/simulators and Android devices
 #   perf server [android]                Only the live dashboard (http://localhost:8099)
@@ -24,20 +30,27 @@
 #
 # --variant picks a domain / brand of a multi-domain project (--brand is the same); without it
 # the default one is built. Add --no-server to `perf ios|android` to only build and install.
+# --repo <path> runs for that project instead of the current folder.
 set -euo pipefail
 
 TOOL="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # The Perf Tool app links its built-in Node here; otherwise the system Node runs the tool.
 if [[ -x "$TOOL/runtime/node" ]]; then NODE="$TOOL/runtime/node"; else NODE="$(command -v node || echo node)"; fi
-REPO="${PERF_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-NAME="$(basename "$REPO")"
-GEN="$TOOL/.generated/$NAME"
-CACHE="$HOME/Library/Caches/perf-tool/$NAME"
 RESULTS_DIR="$HOME/perf-results"
 PORT=8099
 DASHBOARD="http://localhost:$PORT"
 SERVER_PID=""
 TAIL_PID=""
+DEV_PID=""
+
+# The project perf works on and the folders derived from its name.
+use_repo() {
+  REPO="$(cd "$1" 2>/dev/null && pwd)" || { echo "perf: folder not found: $1" >&2; exit 1; }
+  NAME="$(basename "$REPO")"
+  GEN="$TOOL/.generated/$NAME"
+  CACHE="$HOME/Library/Caches/perf-tool/$NAME"
+}
+use_repo "${PERF_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 usage() { sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'; }
 fail() { echo "perf: $*" >&2; exit 1; }
@@ -65,7 +78,7 @@ load_variant() {
   local assignments
   assignments="$("$NODE" "$TOOL/lib/config.mjs" shell --repo "$REPO" ${VARIANT:+--variant "$VARIANT"})" || exit 1
   eval "$assignments"
-  if [[ -n "$ENV_FILE" ]]; then
+  if [[ -n "${ENV_FILE:-}" ]]; then
     [[ -f "$ENV_FILE" ]] || fail "env file of '$VARIANT' not found: $ENV_FILE (perf init to change it)"
     echo "Variant $VARIANT: bundling $(basename "$ENV_FILE")"
     # react-native-config reads its file at build time, in Xcode and Gradle.
@@ -273,7 +286,7 @@ start_server() {
 
 # The scripts stay only when the project has committed them; otherwise package.json goes back clean.
 remove_scripts() {
-  git -C "$REPO" show HEAD:package.json 2>/dev/null | grep -qE '"perf:(ios|android)' && return
+  git -C "$REPO" show HEAD:package.json 2>/dev/null | grep -qE '"perf:(ios|android|web)' && return
   "$NODE" "$TOOL/lib/setup.mjs" --repo "$REPO" --remove --quiet || true
 }
 
@@ -285,6 +298,7 @@ stop_server() {
     rm -f "$CACHE/server.pid"
   fi
   [[ -n "$SERVER_PID" ]] && remove_scripts
+  return 0
 }
 
 # Keeps the dashboard alive in the foreground until Ctrl-C.
@@ -520,6 +534,143 @@ build_android() {
   echo "Probe build installed and launched. The next normal release build re-bundles without the probe."
 }
 
+# ---------- web (perf web) ----------
+
+json_post() { # path json
+  curl -sf -X POST "$DASHBOARD$1" -H 'Content-Type: application/json' -d "$2"
+}
+
+json_of() { # name value [name value …] → {"name":"value",…}
+  "$NODE" -e 'const a = process.argv.slice(1); const o = {}; for (let i = 0; i < a.length; i += 2) o[a[i]] = a[i + 1]; console.log(JSON.stringify(o))' "$@"
+}
+
+# The dashboard server for perf web; a running one is reused and switched to this project.
+start_web_server() { # [--choose]
+  if server_running; then
+    if [[ "${1:-}" != "--choose" ]]; then
+      json_post /project "$(json_of repo "$REPO")" >/dev/null ||
+        fail "the dashboard on port $PORT is from an older perf-tool (or another program): stop it and retry"
+    fi
+    echo "Dashboard already running: $DASHBOARD"
+    open "$DASHBOARD"
+    return
+  fi
+  local log="$HOME/Library/Caches/perf-tool/server.log"
+  local args=()
+  if [[ "${1:-}" == "--choose" ]]; then
+    args=(--choose)
+  else
+    mkdir -p "$CACHE"
+    log="$CACHE/server.log"
+    args=(--repo "$REPO")
+  fi
+  mkdir -p "$(dirname "$log")"
+  "$NODE" "$TOOL/lib/server.mjs" "${args[@]}" >"$log" 2>&1 &
+  SERVER_PID=$!
+  for _ in $(seq 1 40); do server_running && break; sleep 0.25; done
+  server_running || { cat "$log" >&2; fail "dashboard server did not start"; }
+  echo "Dashboard: $DASHBOARD"
+  open "$DASHBOARD"
+  [[ "${1:-}" == "--choose" ]] || "$NODE" "$TOOL/lib/setup.mjs" --repo "$REPO" --quiet || true
+}
+
+# perf web outside a project: the dashboard lists the saved web projects (or a folder to scan).
+choose_project_on_dashboard() {
+  echo "No React project in $REPO: choose one on the dashboard ($DASHBOARD)."
+  start_web_server --choose
+  local choice=""
+  while [[ -z "$choice" ]]; do
+    if [[ -n "$SERVER_PID" ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then fail "the dashboard stopped"; fi
+    choice="$(curl -sf "$DASHBOARD/project/choice?take=1" | "$NODE" -e '
+      let s = ""; process.stdin.on("data", c => (s += c)).on("end", () => {
+        try { const j = JSON.parse(s); if (j.repo) console.log(`${j.repo}\t${j.variant || ""}`); } catch {}
+      });' || true)"
+    [[ -n "$choice" ]] || sleep 1
+  done
+  use_repo "${choice%%$'\t'*}"
+  [[ -z "$VARIANT" ]] && VARIANT="${choice#*$'\t'}"
+  echo "Project: $REPO${VARIANT:+ ($VARIANT)}"
+}
+
+lan_addresses() {
+  "$NODE" -e 'const os = require("os"); for (const list of Object.values(os.networkInterfaces())) for (const item of list ?? []) if (item.family === "IPv4" && !item.internal) console.log(item.address)'
+}
+
+stop_web() {
+  if [[ -n "$DEV_PID" ]] && kill -0 "$DEV_PID" 2>/dev/null; then
+    kill -TERM "$DEV_PID" 2>/dev/null || true
+    for _ in $(seq 1 20); do kill -0 "$DEV_PID" 2>/dev/null || break; sleep 0.25; done
+    kill -KILL "$DEV_PID" 2>/dev/null || true
+  fi
+  DEV_PID=""
+}
+
+# Production build with the probe, served on the app's port (webpack-dev-server with the project's own
+# devServer settings, or vite preview). Runs until Ctrl-C or the dashboard's Stop.
+serve_web() { # chrome|android|none
+  local target="$1"
+  [[ "$PROJECT_KIND" == web ]] || fail "$REPO is set up as a React Native project: use perf ios / perf android (or perf init to change it)"
+  local port="${WEB_PORT_ARG:-$WEB_PORT}"
+  # The app is built and served by the project's own Node (nvm), like its normal builds.
+  local project_node
+  project_node="$(command -v node || echo "$NODE")"
+  "$NODE" "$TOOL/lib/prepare-web.mjs" --repo "$REPO" --out "$GEN" --cache "$CACHE" --variant "$VARIANT" --port "$port" ||
+    fail "could not prepare the probe build"
+  local out_dir="$CACHE/web-build/$(printf '%s' "$VARIANT" | tr -c 'A-Za-z0-9._-' '_')"
+  if server_running; then
+    json_post /web "$(json_of repo "$REPO" variant "$VARIANT" port "$port" bundler "$WEB_BUNDLER" probe "$GEN/web/perf-probe.js" outDir "$out_dir")" >/dev/null ||
+      echo "perf: the dashboard did not accept the web app (older server?)" >&2
+  fi
+  local log="$CACHE/web-build.log"
+  mkdir -p "$CACHE"
+  : >"$log"
+  echo "Building $WEB_BUNDLER production + probe ($VARIANT) on port $port. Log: $log"
+  (
+    cd "$REPO" || exit 1
+    eval "$WEB_ENV_EXPORTS"
+    # A probe build must never upload a release or source maps.
+    unset SENTRY_AUTH_TOKEN
+    case "$WEB_BUNDLER" in
+      vite)
+        "$project_node" node_modules/vite/bin/vite.js build --config "$GEN/vite.perf.config.mjs" ${WEB_MODE:+--mode "$WEB_MODE"} ||
+          { echo "[perf-progress] failed"; exit 1; }
+        echo "[perf-progress] done"
+        exec "$project_node" node_modules/vite/bin/vite.js preview --config "$GEN/vite.perf.config.mjs" ${WEB_MODE:+--mode "$WEB_MODE"}
+        ;;
+      *)
+        [[ -f node_modules/webpack-cli/bin/cli.js ]] || { echo "webpack-cli is not installed in $REPO"; echo "[perf-progress] failed"; exit 1; }
+        exec "$project_node" node_modules/webpack-cli/bin/cli.js serve --config "$GEN/webpack.perf.config.js" --mode production
+        ;;
+    esac
+  ) > >(build_progress web "$log") 2>&1 &
+  DEV_PID=$!
+  until grep -qE '^\[perf-progress\] (done|failed)' "$log" 2>/dev/null; do
+    kill -0 "$DEV_PID" 2>/dev/null || fail "the build stopped, see $log"
+    sleep 1
+  done
+  grep -q '^\[perf-progress\] failed' "$log" && fail "build failed, see $log"
+  local url
+  url="$(grep -oE '(Loopback|Local):[[:space:]]+https?://[^[:space:]]+' "$log" | head -1 | grep -oE 'https?://[^[:space:]]+' || true)"
+  url="${url:-http://localhost:$port/}"
+  url="${url/127.0.0.1/localhost}"
+  echo
+  echo "App on this Mac:      $url"
+  local address
+  for address in $(lan_addresses); do echo "Phones on this Wi-Fi: ${url/localhost/$address}"; done
+  echo "Dashboard:            $DASHBOARD"
+  if [[ "$target" != none ]] && server_running; then
+    json_post /web/open "$(json_of target "$target" url "$url")" >/dev/null || echo "perf: could not open the browser (see the dashboard log)" >&2
+  fi
+  echo "Ctrl-C (or Stop on the dashboard) stops the app and the dashboard."
+  while kill -0 "$DEV_PID" 2>/dev/null; do
+    if [[ -n "$SERVER_PID" ]] && ! kill -0 "$SERVER_PID" 2>/dev/null; then
+      echo "Dashboard stopped."
+      break
+    fi
+    sleep 1
+  done
+}
+
 command="${1:-help}"
 shift || true
 with_server=1
@@ -527,12 +678,19 @@ android_cable=0
 positional=()
 expect_team=0
 expect_variant=0
+expect_repo=0
+expect_port=0
 VARIANT=""
+WEB_PORT_ARG=""
 for arg in "$@"; do
   if [[ $expect_team == 1 ]]; then PERF_TEAM="$arg"; expect_team=0
   elif [[ $expect_variant == 1 ]]; then VARIANT="$arg"; expect_variant=0
+  elif [[ $expect_repo == 1 ]]; then use_repo "$arg"; expect_repo=0
+  elif [[ $expect_port == 1 ]]; then WEB_PORT_ARG="$arg"; expect_port=0
   elif [[ "$arg" == "--team" ]]; then expect_team=1
   elif [[ "$arg" == "--variant" || "$arg" == "--brand" ]]; then expect_variant=1
+  elif [[ "$arg" == "--repo" ]]; then expect_repo=1
+  elif [[ "$arg" == "--port" ]]; then expect_port=1
   elif [[ "$arg" == "--no-server" ]]; then with_server=0
   elif [[ "$arg" == "--cable" ]]; then android_cable=1
   else positional+=("$arg"); fi
@@ -569,6 +727,31 @@ case "$command" in
     [[ $with_server == 1 ]] && start_server "$ANDROID_PACKAGE"
     build_android
     follow_server
+    ;;
+
+  web)
+    require
+    check_for_update
+    web_target="${1:-chrome}"
+    [[ "$web_target" =~ ^(chrome|android|none)$ ]] || fail "perf web [chrome|android|none] — '$web_target' is not one of them"
+    if [[ "$web_target" == android ]]; then command -v adb >/dev/null 2>&1 || fail "'adb' is required for perf web android (Android platform-tools)"; fi
+    trap 'stop_web; stop_server' EXIT
+    trap 'exit 130' INT TERM
+    if [[ ! -f "$REPO/package.json" ]] || ! grep -q '"react"' "$REPO/package.json"; then
+      choose_project_on_dashboard
+    else
+      [[ $with_server == 1 ]] && start_web_server
+    fi
+    load_variant
+    if [[ "$PROJECT_KIND" == web && -n "$SERVER_PID" ]] && ! server_running; then fail "dashboard server stopped"; fi
+    serve_web "$web_target"
+    ;;
+
+  health)
+    require
+    check_project
+    stats="$(ls -t "$CACHE"/web-build/*/perf-stats.json 2>/dev/null | head -1 || true)"
+    exec "$NODE" "$TOOL/lib/code-health.mjs" --repo "$REPO" ${stats:+--stats "$stats"} "$@"
     ;;
 
   devices)

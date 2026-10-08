@@ -88,6 +88,20 @@
   .detail h3 .muted { font-weight: 400; }
   .detail summary { cursor: pointer; color: var(--muted); margin-top: 6px; }
   pre.body { margin: 0; max-height: 480px; overflow: auto; padding: 8px; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+  .badge { display: inline-block; padding: 0 6px; border-radius: 10px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); color: var(--muted); }
+  .badge.high, .badge.critical { color: var(--bad); border-color: var(--bad); }
+  .badge.medium, .badge.moderate { color: var(--warn); border-color: var(--warn); }
+  td.wrap { white-space: normal; min-width: 280px; max-width: 560px; }
+  .verdict { font-weight: 600; } .verdict.bad { color: var(--bad); } .verdict.good { color: var(--good); }
+  .counts { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+  .counts .kpi { min-width: 120px; }
+  .overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: flex-start; justify-content: center; padding: 8vh 16px; background: rgba(0, 0, 0, .45); }
+  .overlay[hidden], [hidden] { display: none !important; }
+  .dialog { width: min(760px, 100%); max-height: 84vh; overflow: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .dialog h2 { margin: 0 0 6px; font-size: 15px; }
+  .project-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .project-row .path { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .app-info a { color: var(--accent); }
   @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } .grid.charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 620px) { .grid.charts { grid-template-columns: 1fr; } }
   @media (max-width: 520px) { header h1 { width: 100%; } }
@@ -105,7 +119,9 @@
   <label class="status" for="openScreen">Open screen</label>
   <select id="openScreen" title="Screens the selected app has shown; it navigates there by itself"><option value="">–</option></select>
   <button id="openScreenGo">Open</button>
+  <span class="status app-info" id="appInfo" hidden></span>
   <span class="spacer"></span>
+  <button id="stopWeb" hidden title="Stops perf web: the app server, Chrome sampling and this dashboard (an active recording is saved)">Stop perf web</button>
   <label class="status" for="label">Label</label>
   <input id="label" placeholder="home-before" size="16" />
   <button class="primary" id="record">● Record</button>
@@ -124,6 +140,8 @@
   <button role="tab" aria-selected="false" data-tab="auto">Auto before / after</button>
   <button role="tab" aria-selected="false" data-tab="inspector">Inspector</button>
   <button role="tab" aria-selected="false" data-tab="crashes">Crashes</button>
+  <button role="tab" aria-selected="false" data-tab="leaks">Memory leaks</button>
+  <button role="tab" aria-selected="false" data-tab="health">Code health</button>
 </nav>
 
 <main>
@@ -131,11 +149,11 @@
     <div class="panel crashes" id="crashPanel" role="alert" hidden></div>
     <div class="kpis" id="kpis"></div>
     <div class="grid charts">
-      <div class="panel"><h2>Temperature <span class="hint" id="tempHint">°C (Android) · thermal state (iOS)</span></h2><canvas id="chartTemp"></canvas><div class="legend" id="legendTemp"></div></div>
-      <div class="panel"><h2>Frames per second <span class="hint">JS vs UI thread</span></h2><canvas id="chartFps"></canvas><div class="legend" id="legendFps"></div></div>
+      <div class="panel"><h2><span id="tempTitle">Temperature</span> <span class="hint" id="tempHint">°C (Android) · thermal state (iOS)</span></h2><canvas id="chartTemp"></canvas><div class="legend" id="legendTemp"></div></div>
+      <div class="panel"><h2>Frames per second <span class="hint" id="fpsHint">JS vs UI thread</span></h2><canvas id="chartFps"></canvas><div class="legend" id="legendFps"></div></div>
       <div class="panel"><h2>CPU by thread <span class="hint">% of one core</span></h2><canvas id="chartThreads"></canvas><div class="legend" id="legendThreads"></div></div>
       <div class="panel"><h2>JS thread load <span class="hint">ms per second</span></h2><canvas id="chartJs"></canvas><div class="legend" id="legendJs"></div></div>
-      <div class="panel"><h2>Garbage collection &amp; memory</h2><canvas id="chartGc"></canvas><div class="legend" id="legendGc"></div></div>
+      <div class="panel"><h2>Garbage collection &amp; memory <span class="hint" id="gcHint"></span></h2><canvas id="chartGc"></canvas><div class="legend" id="legendGc"></div></div>
     </div>
     <div class="row">
       <label class="status" for="windowSize">Aggregate over</label>
@@ -161,6 +179,10 @@
       <div class="panel"><h2>WebSocket <span class="hint">messages per STOMP topic · renders in the commit right after</span></h2><div class="muted" id="socketTotals"></div><div class="table-wrap" id="socketTable"></div></div>
       <div class="panel"><h2>Redux <span class="hint">state slices that changed · renders in the commit right after</span></h2><div class="muted" id="reduxTotals"></div><div class="table-wrap" id="reduxTable"></div></div>
       <div class="panel wide"><h2>Not memoized by React Compiler <span class="hint">rendered in this window</span></h2><div class="table-wrap" id="compilerTable"></div></div>
+      <div class="panel web-only" hidden><h2>Forced synchronous layouts <span class="hint">code that read layout right after changing the page</span></h2><div class="table-wrap" id="forcedTable"></div></div>
+      <div class="panel web-only" hidden><h2>Slow frames <span class="hint">scripts behind long animation frames (Chrome)</span></h2><div class="table-wrap" id="loafTable"></div></div>
+      <div class="panel web-only" hidden><h2>Interactions <span class="hint">slowest input → next paint (INP)</span></h2><div class="table-wrap" id="interactionsTable"></div></div>
+      <div class="panel web-only" hidden><h2>Layout shifts &amp; page <span class="hint">elements that moved (CLS) · load · memory</span></h2><div class="table-wrap" id="pageTable"></div><div class="table-wrap" id="shiftsTable"></div></div>
     </div>
     <details class="panel help">
       <summary>How to read the numbers</summary>
@@ -173,6 +195,7 @@
         <li><b>WebSocket</b>: messages the app received per socket and, for STOMP, per destination (topic); ids in the URL and topic are folded. <b>Renders after</b> are components rendered in the commit right after a message (within 100 ms), split between the topics that arrived before it: a topic with many renders per second is one that keeps the screen re-rendering. The line above the table shows how often each socket opened and closed (reconnects) and with which close codes.</li>
         <li><b>Hermes GC</b>: garbage-collector CPU time and heap of the JS engine. <b>ART GC</b> (Android): Java/Kotlin garbage collector. A rising heap that never drops means a leak.</li>
         <li>The probe build uses React's profiling renderer, so absolute numbers are a little higher than in the store build. Compare <i>probe build vs probe build</i> (before/after).</li>
+        <li><b>Web</b> (perf web): <b>Frames</b> is the page's frame rate. <b>CPU by thread</b>, <b>Layout / Style ms/s</b>, <b>V8 GC</b>, <b>DOM nodes</b> and <b>Listeners</b> come from Chrome or Edge (desktop, or Android Chrome over USB); Safari and Firefox show what the page itself measures. <b>Forced synchronous layout</b>: code read offsetHeight, getBoundingClientRect… right after changing the page, so the browser had to lay out inside the script — the row names the file and line. <b>Slow frames</b>: Chrome's long animation frames with the scripts that made them late. <b>INP</b>: time from an input to the next paint, split into waiting, handlers and paint. <b>CLS</b>: how much content jumped, with the elements that moved.</li>
       </ul>
     </details>
   </section>
@@ -294,7 +317,66 @@
       </div>
     </div>
   </section>
+
+  <section class="tab" id="tab-leaks">
+    <p class="muted">Everything a component set up and did not undo when it unmounted: event listeners, intervals, long timeouts, animation-frame loops, observers, sockets, store and emitter subscriptions. Each keeps the component's closure in memory and keeps running. The probe tracks them in every app (web, iOS, Android); the growth test and detached DOM need the page in Chrome or Edge.</p>
+    <div class="row">
+      <span class="status" id="leakLive">–</span>
+      <span class="spacer"></span>
+      <button id="leakRefresh">Refresh</button>
+      <button id="copyLeaks">Copy as text</button>
+      <button id="downloadLeaks">Download .md</button>
+    </div>
+    <div class="grid">
+      <div class="panel wide"><h2>Still alive after unmount <span class="hint">created by a component that is gone · Alive now = how many still exist</span></h2><div class="table-wrap" id="leaksTable"></div></div>
+      <div class="panel"><h2>removeEventListener that removes nothing <span class="hint">another function (inline arrow, .bind) or capture flag than the one added</span></h2><div class="table-wrap" id="missesTable"></div></div>
+      <div class="panel"><h2>Live resources by place <span class="hint">biggest groups right now · a count that keeps growing is a leak</span></h2><div class="table-wrap" id="groupsTable"></div></div>
+      <div class="panel wide">
+        <h2>Growth test <span class="hint">opens a screen and goes back N times, with garbage collection after each round: what keeps growing is held by something (Chrome / Edge)</span></h2>
+        <div class="row">
+          <label class="status" for="leakAway">Start on</label><input id="leakAway" list="leakPaths" size="18" placeholder="/" />
+          <label class="status" for="leakTarget">Screen to test</label><input id="leakTarget" list="leakPaths" size="24" placeholder="/casino" />
+          <datalist id="leakPaths"></datalist>
+          <label class="status" for="leakRounds">Rounds</label>
+          <select id="leakRounds"><option>3</option><option selected>6</option><option>10</option></select>
+          <button class="primary" id="leakRun">▶ Run growth test</button>
+          <button class="danger" id="leakCancel" hidden>Cancel</button>
+          <button id="leakDetached" title="Heap snapshot: DOM elements that left the page but are still in memory, and what keeps them">Find detached DOM</button>
+        </div>
+        <div class="row"><span class="status" id="leakStatus" role="status" aria-live="polite">–</span></div>
+        <div id="leakResult"></div>
+        <div id="detachedResult"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-health">
+    <p class="muted">A static check of the project's code (no device needed): leaks in effects, Redux selectors that re-render on every dispatch, inline context values, circular imports, CSS / Sass, outdated, vulnerable, duplicated or unused packages and heavy assets. Every row has the file and line and what to do.</p>
+    <div class="row">
+      <button class="primary" id="healthRun">▶ Run check</button>
+      <span class="status" id="healthStatus" role="status" aria-live="polite">–</span>
+      <span class="spacer"></span>
+      <input id="healthFilter" type="search" placeholder="Filter: file, rule, component" aria-label="Filter findings" size="24" />
+      <label class="status" for="healthSeverity">Severity</label>
+      <select id="healthSeverity"><option value="">all</option><option value="high">high</option><option value="medium">medium and high</option></select>
+      <button id="copyHealth">Copy as text</button>
+      <button id="downloadHealth">Download .md</button>
+    </div>
+    <div id="healthReport"><div class="empty">No report yet: press Run check.</div></div>
+  </section>
 </main>
+
+<div class="overlay" id="chooser" hidden role="dialog" aria-modal="true" aria-labelledby="chooserTitle">
+  <div class="dialog">
+    <h2 id="chooserTitle">Choose the project</h2>
+    <p class="muted" id="chooserHint">perf web was started outside a project. Pick a saved web project (and its variant), or choose a folder: it is scanned and saved like on the setup page.</p>
+    <div id="projectList"></div>
+    <div class="row">
+      <button id="chooseFolder">Choose folder…</button>
+      <span class="status" id="chooserStatus" role="status" aria-live="polite"></span>
+    </div>
+  </div>
+</div>
 
 <script>
 const HISTORY = 120;
@@ -466,7 +548,19 @@ source.onmessage = message => {
   } else if (event.type === 'inspect-state') {
     setInspectorOn(event.on);
     return;
+  } else if (event.type === 'project') {
+    renderProject(event.project);
+    return;
+  } else if (event.type === 'leakTest') {
+    renderLeakTest(event.test);
+    return;
+  } else if (event.type === 'health') {
+    renderHealthState(event.health);
+    return;
   } else if (event.type === 'hello') {
+    renderProject(event.project);
+    if (event.leakTest) renderLeakTest(event.leakTest);
+    if (event.health) renderHealthState(event.health);
     renderBuild(event.build);
     setInspectorOn(event.inspecting === true);
     state.labels = new Map(Object.entries(event.labels ?? {}));
@@ -597,6 +691,16 @@ function renderLive() {
   const drops = native10.reduce((sum, e) => sum + (e.ui?.hitches ?? e.ui?.janky ?? 0), 0);
   const maxBlock = Math.max(0, ...js10.map(e => e.maxBlockMs));
   const renderMs = average(js5.map(e => e.commitMs));
+  const isWeb = (lastJs ?? lastNative)?.platform === 'web';
+  document.querySelectorAll('.web-only').forEach(element => { element.hidden = !isWeb; });
+  if (isWeb) {
+    renderWebLive({ liveJs, liveNative, lastJs, lastNative, js5, native5, js10, jsFps, cpu, longTasks, maxBlock, renderMs });
+    renderTables();
+    return;
+  }
+  $('tempTitle').textContent = 'Temperature';
+  $('gcHint').textContent = '';
+  $('fpsHint').textContent = 'JS vs UI thread';
   $('kpis').innerHTML = [
     kpi('JS FPS', fmt(jsFps), level(jsFps, 55, 40, true)),
     kpi('UI FPS', lastNative?.platform === 'android' ? fmt(uiFps) + '<small> frames</small>' : fmt(uiFps), lastNative?.platform === 'android' ? '' : level(uiFps, maxFps * 0.9, maxFps * 0.6, true)),
@@ -818,6 +922,7 @@ function renderTables() {
       triggers.set(key, total);
     }
   }
+  if (js.some(e => e.platform === 'web')) renderWebTables(js, recent(liveNative, seconds));
   $('triggersTable').innerHTML = table([
     { label: 'Component', key: 'component' }, { label: 'Screen', key: 'screen' },
     { label: 'Commits', key: 'commits', num: true }, { label: 'per s', key: 'perSec', num: true, render: r => fmt(r.perSec, 1) },
@@ -852,6 +957,8 @@ function selectTab(name) {
   if (name === 'live') scheduleRender();
   if (name === 'inspector') scheduleInspectRender();
   if (name === 'crashes') renderCrashHistory();
+  if (name === 'leaks') loadLeaks();
+  if (name === 'health' && !healthUi.loaded) loadHealth();
 }
 document.querySelectorAll('nav button').forEach(b => (b.onclick = () => selectTab(b.dataset.tab)));
 
@@ -960,8 +1067,18 @@ function renderSummary(summary) {
       { label: 'JS FPS', key: 'jsFps', num: true }, { label: 'UI FPS', key: 'uiFps', num: true }, { label: 'UI drops', key: 'uiDrops', num: true },
       { label: 'CPU %', key: 'cpuPct', num: true }, { label: 'GC ms/s', key: 'hermesGcMsPerSec', num: true }, { label: 'Alloc MB/s', key: 'allocMbPerSec', num: true },
       { label: 'Heap MB', key: 'heapMaxMb', num: true }, { label: 'Mem MB', key: 'memoryMaxMb', num: true }, { label: 'ART GC', key: 'artGcCount', num: true },
-      { label: 'Battery °C', key: 'batteryMaxC', num: true }, { label: 'CPU °C', key: 'cpuMaxC', num: true }, { label: 'Thermal', key: 'thermalMax', num: true }
+      ...(m.platform === 'web'
+        ? [{ label: 'Layout ms/s', key: 'layoutMsPerSec', num: true }, { label: 'Style ms/s', key: 'styleMsPerSec', num: true }, { label: 'V8 GC ms/s', key: 'v8GcMsPerSec', num: true },
+           { label: 'Forced layout ms/s', key: 'forcedLayoutMsPerSec', num: true }, { label: 'DOM nodes', key: 'domNodesMax', num: true }, { label: 'Listeners', key: 'listenersMax', num: true },
+           { label: 'CLS', key: 'cls', num: true }, { label: 'INP ms', key: 'inpMs', num: true }, { label: 'Leaked', key: 'leakedMax', num: true }]
+        : [{ label: 'Battery °C', key: 'batteryMaxC', num: true }, { label: 'CPU °C', key: 'cpuMaxC', num: true }, { label: 'Thermal', key: 'thermalMax', num: true }, { label: 'Leaked', key: 'leakedMax', num: true }])
     ], summary.screens, 'No screens.')}</div></div>
+    ${summary.web ? `<div class="grid" style="margin-top:12px">
+      <div class="panel"><h2>Forced synchronous layouts</h2><div class="table-wrap">${table(FORCED_COLUMNS, summary.web.forcedLayouts, 'None.')}</div></div>
+      <div class="panel"><h2>Scripts behind slow frames</h2><div class="table-wrap">${table(LOAF_COLUMNS, summary.web.longFrameScripts, 'None (or not Chrome).')}</div></div>
+      <div class="panel"><h2>Slowest interactions</h2><div class="table-wrap">${table(INTERACTION_COLUMNS, summary.web.interactions, 'None.')}</div></div>
+      <div class="panel"><h2>Layout shifts</h2><div class="table-wrap">${table(SHIFT_COLUMNS, summary.web.layoutShifts, 'None.')}</div></div>
+    </div>` : ''}
     <div class="grid" style="margin-top:12px">
       <div class="panel"><h2>Components</h2><div class="table-wrap">${table([
         { label: 'Component', key: 'component' }, { label: 'Screen', key: 'screen' }, { label: 'ms', key: 'selfMs', num: true },
@@ -990,7 +1107,8 @@ function renderSummary(summary) {
     </div>`;
 }
 
-const LOWER_IS_BETTER = new Set(['batteryMaxC', 'cpuMaxC', 'thermalMax', 'renderMsPerSec', 'commitsPerSec', 'longTaskMsPerSec', 'maxBlockMs', 'hermesGcPerSec', 'hermesGcMsPerSec', 'allocMbPerSec', 'heapMaxMb', 'cpuPct', 'uiDrops', 'worstFrameMs', 'memoryMaxMb', 'artGcCount']);
+const LOWER_IS_BETTER = new Set(['batteryMaxC', 'cpuMaxC', 'thermalMax', 'renderMsPerSec', 'commitsPerSec', 'longTaskMsPerSec', 'maxBlockMs', 'hermesGcPerSec', 'hermesGcMsPerSec', 'allocMbPerSec', 'heapMaxMb', 'cpuPct', 'uiDrops', 'worstFrameMs', 'memoryMaxMb', 'artGcCount',
+  'scriptMsPerSec', 'layoutMsPerSec', 'styleMsPerSec', 'v8GcMsPerSec', 'domNodesMax', 'listenersMax', 'cls', 'inpMs', 'forcedLayoutMsPerSec', 'longFrames', 'trackedListenersMax', 'leakedMax']);
 function changeCell(metric, value) {
   if (value == null) return '–';
   const worse = LOWER_IS_BETTER.has(metric) ? value > 0 : value < 0;
@@ -1403,6 +1521,449 @@ setInspectorOn(false);
 
 fetch('/auto').then(response => response.json()).then(state => { renderAuto(state); loadScenarios(); });
 loadRecordings();
+
+// ---------- Web (perf web) ----------
+const sumBy = (rows, pick) => rows.reduce((sum, row) => sum + (pick(row) ?? 0), 0);
+const where = row => row.location ?? row.fn ?? row.functionName ?? row.property ?? '–';
+const CHROME_ONLY = '<span class="muted" title="Chrome or Edge only (desktop, or Android Chrome over USB)">–</span>';
+
+const FORCED_COLUMNS = [
+  { label: 'Where', key: 'location', cls: 'file', render: r => escapeHtml(where(r)) },
+  { label: 'Component', key: 'component', render: r => escapeHtml(r.component ?? '–') },
+  { label: 'Count', key: 'count', num: true },
+  { label: 'ms', key: 'ms', num: true, render: r => fmt(r.ms, 1) },
+  { label: 'max ms', key: 'maxMs', num: true, render: r => fmt(r.maxMs, 1) },
+  { label: 'Read', key: 'property', render: r => escapeHtml(r.property ?? (r.fn && r.fn !== r.location ? r.fn : '–')) },
+  { label: 'Seen by', key: 'from', render: r => escapeHtml(Array.isArray(r.from) ? r.from.join(', ') : r.from ?? '–') }
+];
+const LOAF_COLUMNS = [
+  { label: 'Where', key: 'location', cls: 'file', render: r => escapeHtml(r.location ?? r.url ?? '–') },
+  { label: 'Invoker', key: 'invoker', cls: 'file', render: r => escapeHtml(r.invoker ?? '–') },
+  { label: 'Function', key: 'fn', render: r => escapeHtml(r.fn ?? '–') },
+  { label: 'Frames', key: 'count', num: true },
+  { label: 'ms', key: 'ms', num: true, render: r => fmt(r.ms, 1) },
+  { label: 'Forced layout ms', key: 'forcedLayoutMs', num: true, render: r => fmt(r.forcedLayoutMs, 1) }
+];
+const INTERACTION_COLUMNS = [
+  { label: 'Event', key: 'type' }, { label: 'Target', key: 'target', cls: 'file' },
+  { label: 'ms', key: 'ms', num: true, render: r => `<span class="${r.ms >= 500 ? 'up' : r.ms >= 200 ? '' : 'down'}">${fmt(r.ms)}</span>` },
+  { label: 'Waiting', key: 'inputDelayMs', num: true }, { label: 'Handlers', key: 'processingMs', num: true }, { label: 'Paint', key: 'presentationMs', num: true },
+  { label: 'Screen', key: 'screen' }
+];
+const SHIFT_COLUMNS = [
+  { label: 'Element', key: 'node', cls: 'file' }, { label: 'Shift', key: 'value', num: true, render: r => fmt(r.value, 4) },
+  { label: 'Count', key: 'count', num: true }, { label: 'Screen', key: 'screen' }
+];
+
+function renderWebLive({ liveJs, liveNative, lastJs, lastNative, js5, native5, js10, jsFps, cpu, longTasks, maxBlock, renderMs }) {
+  const chrome = Boolean(lastNative && Date.now() - lastNative.receivedAt < 6000);
+  const web5 = native5.map(e => e.web).filter(Boolean);
+  const layoutMs = chrome ? average(web5.map(w => w.layoutMs)) : null;
+  const styleMs = chrome ? average(web5.map(w => w.styleMs)) : null;
+  const v8Gc = chrome ? average(native5.map(e => e.gc?.v8Ms)) : null;
+  const probeForced = average(js5.map(e => sumBy(e.web?.forcedLayouts ?? [], f => f.ms)));
+  const chromeForced = chrome ? average(web5.map(w => sumBy(w.forcedLayouts ?? [], f => f.ms))) : null;
+  const forcedMs = Math.max(probeForced ?? 0, chromeForced ?? 0);
+  const heap = (chrome ? lastNative.memoryMb : null) ?? [...liveJs].reverse().find(e => e.web?.memory?.heapMb != null)?.web.memory.heapMb;
+  const nodes = (chrome ? lastNative.web?.nodes : null) ?? lastJs?.web?.memory?.domNodes;
+  const listeners = chrome ? lastNative.web?.listeners : null;
+  const leaked = lastJs?.leaks?.leaked;
+  const minute = recent(liveJs, 60);
+  const cls = sumBy(minute, e => e.web?.vitals?.cls);
+  const inp = Math.max(0, ...minute.flatMap(e => (e.web?.vitals?.interactions ?? []).map(i => i.ms)));
+  const n = (value, digits = 0, unit = '') => (value == null ? CHROME_ONLY : fmt(value, digits) + unit);
+  $('kpis').innerHTML = [
+    kpi('Frames', fmt(jsFps), level(jsFps, 55, 40, true)),
+    kpi('Main thread CPU', chrome ? fmt(cpu) + '%' : CHROME_ONLY, chrome ? level(cpu, 30, 80) : ''),
+    kpi('Render ms/s', fmt(renderMs, 1), level(renderMs, 50, 200)),
+    kpi('Long tasks 10s', longTasks, level(longTasks, 0, 5)),
+    kpi('Max block', fmt(maxBlock) + 'ms', level(maxBlock, 50, 200)),
+    kpi('Layout ms/s', n(layoutMs, 1), level(layoutMs, 20, 80)),
+    kpi('Style ms/s', n(styleMs, 1), level(styleMs, 20, 80)),
+    kpi('Forced layout ms/s', fmt(forcedMs, 1), level(forcedMs, 2, 20)),
+    kpi('V8 GC ms/s', n(v8Gc, 1), level(v8Gc, 10, 50)),
+    kpi('JS heap', heap == null ? CHROME_ONLY : fmt(heap, 1) + 'MB'),
+    kpi('DOM nodes', nodes == null ? '–' : fmt(nodes), level(nodes, 1500, 4000)),
+    kpi('Listeners', n(listeners)),
+    kpi('Leaked', leaked == null ? '–' : fmt(leaked), level(leaked, 0, 5)),
+    kpi('CLS 60s', fmt(cls, 3), level(cls, 0.1, 0.25)),
+    kpi('INP 60s', inp ? fmt(inp) + 'ms' : '–', inp ? level(inp, 200, 500) : '')
+  ].join('');
+
+  const colors = palette();
+  $('tempTitle').textContent = 'Layout & style';
+  $('tempHint').textContent = chrome ? 'ms per second' : 'ms per second · Chrome / Edge only';
+  const layoutSeries = [
+    { label: 'Layout ms', color: colors[1], values: perSecond(liveNative, e => e.web?.layoutMs) },
+    { label: 'Style ms', color: colors[3], values: perSecond(liveNative, e => e.web?.styleMs) },
+    { label: 'Forced layout ms', color: colors[4], values: perSecond(liveJs, e => sumBy(e.web?.forcedLayouts ?? [], f => f.ms)) }
+  ];
+  drawChart($('chartTemp'), layoutSeries); legend($('legendTemp'), layoutSeries);
+
+  $('fpsHint').textContent = 'frames the page painted';
+  const fpsSeries = [{ label: 'Frames', color: colors[0], values: perSecond(liveJs, e => e.jsFps) }];
+  drawChart($('chartFps'), fpsSeries); legend($('legendFps'), fpsSeries);
+
+  const threadTotals = new Map();
+  for (const event of recent(liveNative, HISTORY)) for (const t of event.threads ?? []) threadTotals.set(t.name, (threadTotals.get(t.name) ?? 0) + t.cpuMs);
+  const topThreads = [...threadTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([name]) => name);
+  const threadSeries = topThreads.map((name, index) => ({
+    label: name, color: colors[index], values: perSecond(liveNative, e => (e.threads?.find(t => t.name === name)?.cpuMs ?? 0) / 10)
+  }));
+  drawChart($('chartThreads'), threadSeries, { unit: '%' }); legend($('legendThreads'), threadSeries);
+
+  const jsSeries = [
+    { label: 'React render ms', color: colors[0], values: perSecond(liveJs, e => e.commitMs) },
+    { label: 'Long task ms', color: colors[1], values: perSecond(liveJs, e => e.longTaskMs) },
+    { label: 'Script ms', color: colors[2], values: perSecond(liveNative, e => e.web?.scriptMs) },
+    { label: 'Max block ms', color: colors[4], values: perSecond(liveJs, e => e.maxBlockMs) }
+  ];
+  drawChart($('chartJs'), jsSeries); legend($('legendJs'), jsSeries);
+
+  $('gcHint').textContent = chrome ? 'V8' : 'heap: Chrome only';
+  const gcSeries = [
+    { label: 'V8 GC ms', color: colors[2], values: perSecond(liveNative, e => e.gc?.v8Ms) },
+    { label: 'JS heap MB', color: colors[3], values: perSecond(liveNative.length ? liveNative : liveJs, e => e.memoryMb ?? e.web?.memory?.heapMb) }
+  ];
+  drawChart($('chartGc'), gcSeries); legend($('legendGc'), gcSeries);
+}
+
+function renderWebTables(js, native) {
+  const forced = new Map();
+  const addForced = (entry, from) => {
+    const key = entry.location ?? (entry.site ? entry.site.split('\n')[0] : `${entry.url ?? ''}:${entry.line ?? ''}:${entry.functionName ?? ''}`);
+    const row = forced.get(key) ?? { location: entry.location ?? null, fn: entry.fn ?? entry.functionName ?? null, property: entry.property ?? null, component: entry.component ?? null, count: 0, ms: 0, maxMs: 0, from: [] };
+    row.count += entry.count ?? 1; row.ms += entry.ms ?? 0; row.maxMs = Math.max(row.maxMs, entry.maxMs ?? entry.ms ?? 0);
+    row.component = row.component ?? entry.component ?? null;
+    if (!row.from.includes(from)) row.from.push(from);
+    forced.set(key, row);
+  };
+  for (const event of js) for (const entry of event.web?.forcedLayouts ?? []) addForced(entry, 'page');
+  for (const event of native) for (const entry of event.web?.forcedLayouts ?? []) addForced(entry, 'Chrome');
+  $('forcedTable').innerHTML = table(FORCED_COLUMNS, [...forced.values()].sort((a, b) => b.ms - a.ms).slice(0, 30), 'No forced layouts in this window. 👍');
+
+  const scripts = new Map();
+  for (const event of js) for (const frame of event.web?.loafs ?? []) for (const script of frame.scripts ?? []) {
+    const key = script.location ?? `${script.invoker ?? ''} ${script.fn ?? ''}`;
+    const row = scripts.get(key) ?? { location: script.location ?? null, url: script.url ?? null, invoker: script.invoker ?? null, fn: script.fn ?? null, count: 0, ms: 0, forcedLayoutMs: 0 };
+    row.count += 1; row.ms += script.ms ?? 0; row.forcedLayoutMs += script.forcedLayoutMs ?? 0;
+    scripts.set(key, row);
+  }
+  $('loafTable').innerHTML = table(LOAF_COLUMNS, [...scripts.values()].sort((a, b) => b.ms - a.ms).slice(0, 30), 'No slow frames (or not Chrome 123+).');
+
+  const interactions = js.flatMap(e => (e.web?.vitals?.interactions ?? []).map(i => ({ ...i, screen: e.screen }))).sort((a, b) => b.ms - a.ms).slice(0, 30);
+  $('interactionsTable').innerHTML = table(INTERACTION_COLUMNS, interactions, 'No interactions over 40 ms in this window.');
+
+  const shifts = new Map();
+  for (const event of js) for (const shift of event.web?.vitals?.shifts ?? []) for (const node of shift.nodes ?? []) {
+    const row = shifts.get(node) ?? { node, value: 0, count: 0, screen: event.screen };
+    row.value += shift.value; row.count += 1; shifts.set(node, row);
+  }
+  $('shiftsTable').innerHTML = table(SHIFT_COLUMNS, [...shifts.values()].sort((a, b) => b.value - a.value).slice(0, 20), 'No layout shifts in this window.');
+
+  const all = viewEvents(state.js);
+  const lcp = [...all].reverse().find(e => e.web?.vitals?.lcp)?.web.vitals.lcp;
+  const load = all.find(e => e.web?.vitals?.pageLoad)?.web.vitals.pageLoad;
+  const last = js.at(-1);
+  const lastNative = native.at(-1);
+  const rows = [
+    lcp && { what: 'Largest paint (LCP)', value: `${lcp.ms} ms`, detail: lcp.element ?? '' },
+    load && { what: 'Page load', value: `${load.loadMs} ms`, detail: `first byte ${load.ttfbMs} ms · DOMContentLoaded ${load.domContentLoadedMs} ms · ${load.transferKb} KB` },
+    last?.web?.memory?.domNodes != null && { what: 'DOM nodes', value: fmt(lastNative?.web?.nodes ?? last.web.memory.domNodes), detail: '' },
+    (lastNative?.memoryMb ?? last?.web?.memory?.heapMb) != null && { what: 'JS heap', value: `${fmt(lastNative?.memoryMb ?? last.web.memory.heapMb, 1)} MB`, detail: lastNative?.web?.heapTotalMb ? `of ${fmt(lastNative.web.heapTotalMb, 1)} MB allocated` : '' },
+    lastNative?.web?.listeners != null && { what: 'Event listeners', value: fmt(lastNative.web.listeners), detail: `${last?.leaks?.live?.listener ?? '–'} on globals / added by components (tracked)` }
+  ].filter(Boolean);
+  $('pageTable').innerHTML = table([{ label: 'What', key: 'what' }, { label: 'Value', key: 'value', num: true }, { label: '', key: 'detail', cls: 'file' }], rows, 'Waiting for the page…');
+}
+
+// ---------- Project: perf web without a project, the app's address, Stop ----------
+const projectUi = { project: null, chosen: null, listLoaded: false };
+
+function renderProject(project) {
+  if (!project) return;
+  projectUi.project = project;
+  document.title = project.name ? `Live Perf · ${project.name}` : 'Live Perf';
+  const web = project.web;
+  $('appInfo').hidden = !web;
+  $('stopWeb').hidden = !web;
+  if (web) {
+    const local = `http://localhost:${web.port}/`;
+    $('appInfo').innerHTML = `App: <a href="${escapeHtml(local)}" target="_blank" rel="noopener">${escapeHtml(local)}</a>${(web.addresses ?? []).length ? ` · phones: ${web.addresses.map(address => `<b>${escapeHtml(address)}</b>`).join(' ')}` : ''}`;
+    projectUi.chosen = null;
+  }
+  const waiting = project.waitingForChoice && !web;
+  $('chooser').hidden = !waiting;
+  if (waiting) {
+    if (projectUi.chosen) $('chooserStatus').textContent = `Building ${projectUi.chosen}… (progress in the bar above)`;
+    if (!projectUi.listLoaded) loadProjects();
+  }
+}
+
+async function loadProjects() {
+  projectUi.listLoaded = true;
+  const data = await (await fetch('/projects')).json();
+  const projects = data.projects.filter(item => item.exists);
+  $('projectList').innerHTML = projects.length
+    ? projects.map((item, index) => `<div class="project-row">
+        <div><b>${escapeHtml(item.name)}</b> <span class="badge">${item.kind === 'web' ? 'web' : 'React Native'}</span><div class="path">${escapeHtml(item.repo)}</div></div>
+        ${item.kind === 'web'
+          ? `<select id="variant${index}" aria-label="Variant of ${escapeHtml(item.name)}">${item.variants.map(variant => `<option${variant === item.defaultVariant ? ' selected' : ''}>${escapeHtml(variant)}</option>`).join('')}</select>
+             <button class="primary" data-start="${index}">Start</button>`
+          : `<span class="muted">run perf ios / perf android in its folder</span><span></span>`}
+      </div>`).join('')
+    : '<div class="empty">No saved projects yet: choose a folder.</div>';
+  document.querySelectorAll('[data-start]').forEach(button => {
+    button.onclick = async () => {
+      const item = projects[Number(button.dataset.start)];
+      const variant = $(`variant${button.dataset.start}`)?.value ?? null;
+      const response = await fetch('/project/choose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ repo: item.repo, variant }) });
+      const body = await response.json();
+      if (!response.ok) return toast(body.error);
+      projectUi.chosen = `${item.name}${variant ? ` (${variant})` : ''}`;
+      $('chooserStatus').textContent = `Building ${projectUi.chosen}… (progress in the bar above)`;
+      document.querySelectorAll('[data-start]').forEach(other => { other.disabled = true; });
+    };
+  });
+}
+
+$('chooseFolder').onclick = async () => {
+  $('chooserStatus').textContent = 'Choose the folder in the window that opened…';
+  const response = await fetch('/projects/choose-folder', { method: 'POST' });
+  const body = await response.json();
+  if (!response.ok) { $('chooserStatus').textContent = body.error; return; }
+  if (body.cancelled) { $('chooserStatus').textContent = ''; return; }
+  if (!body.saved) {
+    $('chooserStatus').innerHTML = `The scan could not fill in everything for ${escapeHtml(body.repo)}: ${escapeHtml((body.errors ?? []).join('; '))}. Fix it on the setup page (<code>perf init</code> in that folder).`;
+    return;
+  }
+  $('chooserStatus').textContent = `Added ${body.project.name}.`;
+  loadProjects();
+};
+
+$('stopWeb').onclick = async () => {
+  if (!confirm('Stop perf web? The app server, Chrome sampling and this dashboard stop (an active recording is saved).')) return;
+  await fetch('/shutdown', { method: 'POST' }).catch(() => {});
+  toast('Stopped. Run perf web again to start.');
+};
+
+// ---------- Memory leaks ----------
+const KIND_LABEL = { listener: 'listener', interval: 'interval', timeout: 'timeout', raf: 'animation loop', observer: 'observer', socket: 'connection', subscription: 'subscription' };
+const leakUi = { report: null, test: null };
+const leakSourceUrl = path => `${path}${path.includes('?') ? '&' : '?'}source=${encodeURIComponent(state.source)}`;
+
+async function loadLeaks() {
+  if (!state.source) { $('leakLive').textContent = 'Waiting for a device…'; return; }
+  const response = await fetch(leakSourceUrl('/leaks'));
+  if (!response.ok) return;
+  leakUi.report = await response.json();
+  renderLeaks();
+  updateLeakPaths();
+}
+setInterval(() => { if ($('tab-leaks').classList.contains('active')) loadLeaks(); }, 3000);
+$('leakRefresh').onclick = loadLeaks;
+$('copyLeaks').onclick = () => copyText(leakSourceUrl('/export/leaks'));
+$('downloadLeaks').onclick = () => download(leakSourceUrl('/export/leaks'));
+
+const createdAt = r => `${escapeHtml(r.location ?? r.fn ?? '–')}${r.own === false ? ' <span class="muted">(library)</span>' : ''}`;
+
+function renderLeaks() {
+  const report = leakUi.report;
+  if (!report?.available) {
+    $('leakLive').textContent = `No leak data from ${displayName(state.source)} yet (needs a probe build from this perf-tool version).`;
+    for (const id of ['leaksTable', 'missesTable', 'groupsTable']) $(id).innerHTML = '';
+    return;
+  }
+  const leaked = (report.leaks ?? []).reduce((sum, row) => sum + row.live, 0);
+  $('leakLive').innerHTML = `${escapeHtml(displayName(report.source))}: tracking ${Object.entries(report.live ?? {}).filter(([, count]) => count).map(([kind, count]) => `${count} ${KIND_LABEL[kind] ?? kind}${count === 1 ? '' : 's'}`).join(', ') || 'nothing'} · <span class="${leaked ? 'up' : 'down'}">${leaked} leaked</span>${report.dropped ? ` · ${report.dropped} not tracked (limit)` : ''}`;
+  $('leaksTable').innerHTML = table([
+    { label: 'Component', key: 'component', render: r => `${escapeHtml(r.component ?? '(unknown)')}${r.own ? '' : ' <span class="muted">(library)</span>'}` },
+    { label: 'What', key: 'detail', render: r => escapeHtml(`${KIND_LABEL[r.kind] ?? r.kind}: ${r.detail}`) },
+    { label: 'Alive now', key: 'live', num: true, render: r => `<span class="${r.live ? 'up' : 'down'}">${r.live}</span>` },
+    { label: 'Leaked total', key: 'total', num: true },
+    { label: 'Created at', key: 'location', cls: 'file', render: createdAt },
+    { label: 'Component file', key: 'componentFile', cls: 'file' }
+  ], report.leaks ?? [], 'Nothing outlived its component. Open and leave the screens you want to check.');
+  $('missesTable').innerHTML = table([
+    { label: 'Component', key: 'component' }, { label: 'Listener', key: 'detail' }, { label: 'Why', key: 'reason' },
+    { label: 'Times', key: 'count', num: true },
+    { label: 'Added at', key: 'location', cls: 'file', render: createdAt },
+    { label: 'Removed at', key: 'removeLocation', cls: 'file', render: r => escapeHtml(r.removeLocation ?? '–') }
+  ], report.removeMisses ?? [], 'None seen.');
+  $('groupsTable').innerHTML = table([
+    { label: 'What', key: 'detail', render: r => escapeHtml(`${KIND_LABEL[r.kind] ?? r.kind}: ${r.detail}`) },
+    { label: 'Component', key: 'component', render: r => escapeHtml(r.component ?? '(none)') },
+    { label: 'Count', key: 'count', num: true },
+    { label: 'Oldest', key: 'oldestMs', num: true, render: r => `${fmt(r.oldestMs / 1000)} s` },
+    { label: 'Created at', key: 'location', cls: 'file', render: createdAt }
+  ], report.groups ?? [], 'Nothing tracked yet.');
+  if (report.detached) renderDetached(report.detached);
+  if (report.test) renderLeakTest(report.test);
+}
+
+function updateLeakPaths() {
+  const paths = [...new Set(viewEvents(state.js).map(e => e.path).filter(Boolean))].sort();
+  $('leakPaths').innerHTML = paths.map(path => `<option value="${escapeHtml(path)}"></option>`).join('');
+  const current = viewEvents(state.js).at(-1)?.path;
+  if (!$('leakAway').value && current) $('leakAway').value = current;
+}
+
+function renderLeakTest(test) {
+  leakUi.test = test;
+  const busy = test.phase && test.phase !== 'idle';
+  $('leakRun').disabled = busy;
+  $('leakDetached').disabled = busy;
+  $('leakCancel').hidden = test.phase !== 'running';
+  $('leakStatus').innerHTML = test.error
+    ? `<span class="up">${escapeHtml(test.error)}</span>`
+    : busy ? escapeHtml(`${test.cycle ? `Round ${test.cycle}/${test.cycles} · ` : ''}${test.step ?? ''}`) : test.result ? `Last test: ${escapeHtml(new Date(test.result.at).toLocaleTimeString())} · ${escapeHtml(test.awayPath ?? '')} ⇄ ${escapeHtml(test.targetPath ?? '')}` : '–';
+  const result = test.result;
+  if (!result) { $('leakResult').innerHTML = ''; return; }
+  $('leakResult').innerHTML = `
+    <p class="verdict ${result.leak ? 'bad' : 'good'}">${result.leak ? `Leak suspected: ${escapeHtml(result.verdicts.join('; '))}.` : `Nothing grew round after round (${result.rounds} rounds).`}</p>
+    <div class="grid">
+      <div class="panel"><h2>After each round <span class="hint">after garbage collection</span></h2><div class="table-wrap">${table([
+        { label: 'Round', key: 'round', num: true }, { label: 'JS heap MB', key: 'heapUsedMb', num: true, render: r => fmt(r.heapUsedMb, 1) },
+        { label: 'DOM nodes', key: 'nodes', num: true }, { label: 'Listeners', key: 'listeners', num: true }, { label: 'Documents', key: 'documents', num: true }
+      ], result.samples.map((sample, index) => ({ round: index, ...sample })), '–')}</div></div>
+      <div class="panel"><h2>Objects that grew every round <span class="hint">heap snapshot before vs after</span></h2><div class="table-wrap">${table([
+        { label: 'Constructor', key: 'name' }, { label: 'Before', key: 'before', num: true }, { label: 'After', key: 'after', num: true },
+        { label: 'Δ', key: 'delta', num: true, render: r => `<span class="up">+${r.delta}</span>` }, { label: 'Δ KB', key: 'deltaKb', num: true }
+      ], result.growing ?? [], 'Nothing grew by at least one per round.')}</div></div>
+      ${result.trackerLeaks?.length ? `<div class="panel wide"><h2>What the probe saw left behind</h2><div class="table-wrap">${table([
+        { label: 'Component', key: 'component' }, { label: 'What', key: 'detail', render: r => escapeHtml(`${KIND_LABEL[r.kind] ?? r.kind}: ${r.detail}`) },
+        { label: 'Alive', key: 'live', num: true }, { label: 'Created at', key: 'location', cls: 'file', render: createdAt }
+      ], result.trackerLeaks, '')}</div></div>` : ''}
+    </div>`;
+}
+
+function renderDetached(result) {
+  $('detachedResult').innerHTML = `<div class="panel" style="margin-top:12px"><h2>Detached DOM <span class="hint">${result.totalDetached} elements out of the page but still in memory · snapshot ${fmt(result.snapshotMb, 1)} MB${result.at ? ` · ${new Date(result.at).toLocaleTimeString()}` : ''}</span></h2><div class="table-wrap">${table([
+    { label: 'Element', key: 'name' }, { label: 'Count', key: 'count', num: true }, { label: 'KB', key: 'selfKb', num: true, render: r => fmt(r.selfKb, 1) },
+    { label: 'Kept alive by', key: 'retainers', cls: 'wrap', render: r => escapeHtml((r.retainers ?? []).map(step => `${step.edge} ← ${step.node}`).join('  ←  ') || '–') }
+  ], result.groups ?? [], 'No detached DOM. 👍')}</div></div>`;
+}
+
+$('leakRun').onclick = async () => {
+  const awayPath = $('leakAway').value.trim();
+  const targetPath = $('leakTarget').value.trim();
+  if (!awayPath || !targetPath) return toast('Enter both paths, e.g. / and /casino');
+  await post('/leaks/test', { source: state.source, awayPath, targetPath, cycles: Number($('leakRounds').value) });
+};
+$('leakCancel').onclick = () => post('/leaks/test/cancel');
+$('leakDetached').onclick = async () => {
+  const result = await post('/leaks/detached', { source: state.source });
+  if (result) renderDetached({ ...result, at: Date.now() });
+};
+
+// ---------- Code health ----------
+const healthUi = { loaded: false, report: null, state: null, lastFinished: null };
+const SEVERITY_RANK = { critical: 3, high: 3, medium: 2, moderate: 2, low: 1 };
+
+async function loadHealth() {
+  const response = await fetch('/health');
+  const body = await response.json();
+  healthUi.loaded = true;
+  healthUi.report = body.report ?? null;
+  renderHealthState(body);
+  renderHealth();
+}
+
+function renderHealthState(health) {
+  healthUi.state = health;
+  const running = health.state === 'running';
+  $('healthRun').disabled = running;
+  $('healthStatus').innerHTML = running
+    ? escapeHtml(`Running… ${health.step ?? ''}`)
+    : health.error ? `<span class="up">${escapeHtml(health.error)}</span>`
+    : healthUi.report ? escapeHtml(`Report of ${new Date(healthUi.report.generatedAt).toLocaleString()} (took ${fmt((healthUi.report.tookMs ?? 0) / 1000)} s)`) : '–';
+  if (!running && health.finishedAt && health.finishedAt !== healthUi.lastFinished) {
+    healthUi.lastFinished = health.finishedAt;
+    if (healthUi.loaded) loadHealth();
+  }
+}
+
+$('healthRun').onclick = () => post('/health/run');
+$('copyHealth').onclick = () => copyText('/export/health');
+$('downloadHealth').onclick = () => download('/export/health');
+$('healthFilter').oninput = () => renderHealth();
+$('healthSeverity').onchange = () => renderHealth();
+
+const SECTION_TITLES = {
+  leaks: 'Leaks in effects', selectors: 'Redux selectors', context: 'Context values', assets: 'Heavy assets', css: 'CSS / Sass'
+};
+
+function findingsVisible(findings) {
+  const text = $('healthFilter').value.trim().toLowerCase();
+  const minimum = SEVERITY_RANK[$('healthSeverity').value] ?? 0;
+  return (findings ?? []).filter(item => (SEVERITY_RANK[item.severity] ?? 0) >= minimum &&
+    (!text || [item.file, item.rule, item.component, item.message].some(value => String(value ?? '').toLowerCase().includes(text))))
+    .sort((a, b) => (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0));
+}
+
+const FINDING_COLUMNS = [
+  { label: 'Severity', key: 'severity', render: r => `<span class="badge ${escapeHtml(r.severity)}">${escapeHtml(r.severity)}</span>` },
+  { label: 'Where', key: 'file', cls: 'file', render: r => escapeHtml(`${r.file ?? ''}${r.line ? `:${r.line}` : ''}`) },
+  { label: 'Component', key: 'component', render: r => escapeHtml(r.component ?? '–') },
+  { label: 'Problem', key: 'message', cls: 'wrap' },
+  { label: 'Fix', key: 'fix', cls: 'wrap' },
+  { label: 'Rule', key: 'rule', cls: 'file' }
+];
+
+function countBadges(findings) {
+  const count = severity => (findings ?? []).filter(item => item.severity === severity).length;
+  return ['high', 'medium', 'low'].map(severity => `<span class="badge ${severity}">${count(severity)} ${severity}</span>`).join(' ');
+}
+
+function renderHealth() {
+  const report = healthUi.report;
+  if (!report) { $('healthReport').innerHTML = '<div class="empty">No report yet: press Run check.</div>'; return; }
+  const sections = report.sections ?? {};
+  const panels = [];
+  for (const key of ['leaks', 'selectors', 'context', 'css', 'assets']) {
+    const section = sections[key];
+    if (!section) continue;
+    const rows = findingsVisible(section.findings);
+    const stats = key === 'css' && section.stats ? ` · ${section.stats.files ?? 0} files, ${section.stats.importantCount ?? 0} !important, ${section.stats.colorLiterals ?? 0} hard-coded colours` : '';
+    panels.push(`<div class="panel wide"><h2>${SECTION_TITLES[key]} <span class="hint">${countBadges(section.findings)}${stats}</span></h2><div class="table-wrap">${table(FINDING_COLUMNS, rows, 'Nothing found. 👍')}</div>
+      ${key === 'css' && section.stats?.cssKbByChunk?.length ? `<div class="table-wrap">${table([{ label: 'Chunk', key: 'chunk' }, { label: 'CSS KB', key: 'kb', num: true, render: r => fmt(r.kb, 1) }, { label: 'Loaded at start', key: 'initial', render: r => (r.initial ? 'yes' : 'lazy') }], section.stats.cssKbByChunk, '')}</div>` : ''}</div>`);
+  }
+  const circular = sections.circular;
+  if (circular) {
+    panels.push(`<div class="panel wide"><h2>Circular imports <span class="hint">${circular.cycles.length} cycles · a module that is used before it finished loading gets undefined; cycles also defeat code splitting</span></h2><div class="table-wrap">${table([
+      { label: 'Files', key: 'files', num: true, render: r => r.files.length },
+      { label: 'Cycle', key: 'files', cls: 'wrap', render: r => escapeHtml([...r.files, r.files[0]].join(' → ')) },
+      { label: 'Imports', key: 'edges', cls: 'wrap', render: r => escapeHtml((r.edges ?? []).map(edge => `${edge.from}:${edge.line}`).join(', ')) },
+      { label: '', key: 'viaBarrel', render: r => (r.viaBarrel ? '<span class="muted">via index.ts</span>' : '') }
+    ], circular.cycles.filter(cycle => !$('healthFilter').value.trim() || cycle.files.some(file => file.toLowerCase().includes($('healthFilter').value.trim().toLowerCase()))), 'No circular imports. 👍')}</div></div>`);
+  }
+  const deps = sections.dependencies;
+  if (deps) {
+    panels.push(`<div class="panel"><h2>Outdated packages <span class="hint">${deps.outdated.length}</span></h2><div class="table-wrap">${table([
+      { label: 'Package', key: 'name' }, { label: 'Installed', key: 'installed' }, { label: 'Latest', key: 'latest' },
+      { label: 'Behind', key: 'majorsBehind', render: r => (r.majorsBehind ? `<span class="up">${r.majorsBehind} major</span>` : r.minorsBehind ? `${r.minorsBehind} minor` : 'patch') },
+      { label: 'Deprecated', key: 'deprecated', cls: 'wrap', render: r => (r.deprecated ? `<span class="up">${escapeHtml(r.deprecated)}</span>` : '') },
+      { label: 'Type', key: 'type', cls: 'file' }
+    ], deps.outdated, 'Everything is current. 👍')}</div></div>`);
+    panels.push(`<div class="panel"><h2>Vulnerabilities <span class="hint">${deps.vulnerabilities.length}</span></h2><div class="table-wrap">${table([
+      { label: 'Severity', key: 'severity', render: r => `<span class="badge ${escapeHtml(r.severity)}">${escapeHtml(r.severity)}</span>` },
+      { label: 'Package', key: 'name', render: r => escapeHtml(`${r.name}@${r.version}`) },
+      { label: 'Problem', key: 'title', cls: 'wrap', render: r => (r.url ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>` : escapeHtml(r.title)) },
+      { label: 'Affected', key: 'vulnerableVersions', cls: 'file' }, { label: 'Through', key: 'dependencyOf', render: r => escapeHtml(r.dependencyOf ?? '–') }
+    ], deps.vulnerabilities, 'No known vulnerabilities. 👍')}</div></div>`);
+    panels.push(`<div class="panel"><h2>Duplicated &amp; heavy packages</h2><div class="table-wrap">${table([
+      { label: 'Package', key: 'name' }, { label: 'Versions', key: 'versions', cls: 'wrap', render: r => escapeHtml(r.versions.map(v => `${v.version}${v.kb != null ? ` (${fmt(v.kb)} KB)` : ''}`).join(', ')) }
+    ], deps.duplicates, 'No package is bundled twice. 👍')}</div><div class="table-wrap">${table([
+      { label: 'Package', key: 'name' }, { label: 'KB', key: 'kb', num: true, render: r => fmt(r.kb) }, { label: '% of JS', key: 'share', num: true, render: r => fmt(r.share, 1) },
+      { label: 'Note', key: 'note', cls: 'wrap', render: r => escapeHtml(r.note ?? '') }
+    ], deps.heavy, '')}</div></div>`);
+    panels.push(`<div class="panel"><h2>Probably unused packages <span class="hint">not imported anywhere — check before removing</span></h2><div class="table-wrap">${table([
+      { label: 'Package', key: 'name' }, { label: 'Type', key: 'type', cls: 'file' }, { label: 'Note', key: 'note', cls: 'wrap' }
+    ], deps.unused, 'None. 👍')}</div>${deps.skipped?.length ? `<p class="muted">Not checked: ${escapeHtml(deps.skipped.map(item => `${item.name} (${item.reason})`).join(', '))}</p>` : ''}</div>`);
+  }
+  const errors = report.errors ?? [];
+  $('healthReport').innerHTML = `<div class="grid">${panels.join('')}</div>${errors.length ? `<details class="panel help"><summary>${errors.length} files or checks could not be analysed</summary><ul>${errors.map(error => `<li>${escapeHtml(`${error.section}${error.file ? ` · ${error.file}` : ''}: ${error.message}`)}</li>`).join('')}</ul></details>` : ''}`;
+  renderHealthState(healthUi.state ?? { state: 'idle' });
+}
 </script>
 </body>
 </html>

@@ -86,7 +86,7 @@
       <button id="chooseRepo">Choose folder…</button>
       <button class="primary" id="scan">Scan</button>
     </div>
-    <p class="muted" id="scanStatus">Choose the React Native project folder (the one with package.json). The scan fills in everything it can find; the rest can be typed in.</p>
+    <p class="muted" id="scanStatus">Choose the project folder (the one with package.json): a React Native app or a React web app (webpack, Vite or Create React App). The scan fills in everything it can find; the rest can be typed in.</p>
   </section>
 
   <section id="checksSection" aria-labelledby="checksTitle" hidden>
@@ -171,11 +171,54 @@ function tip(text) {
 
 // ------------------------------------------------------------ what is missing and how to fix it
 
+const isWebProject = () => state.project?.kind === 'web';
+
+function webIssues(scan, project) {
+  const found = {};
+  const tools = scan.tools;
+  found['tool.node'] = tools.node
+    ? { level: 'ok', text: `Node ${tools.node} for the project's builds (perf-tool itself runs on its built-in Node ${tools.toolNode})` }
+    : { level: 'error', text: 'Node.js not found. The project\'s webpack / Vite build needs it.', fix: 'Install Node (the version in the project\'s .nvmrc / engines), e.g. <code>brew install nvm && nvm install 22</code>, then open the setup again.' };
+  found['tool.chrome'] = tools.chrome
+    ? { level: 'ok', text: `${tools.chrome}: CPU per thread, garbage collection, layout, memory and the leak tests come from it` }
+    : { level: 'warn', text: 'No Chrome or Edge found: the page\'s own numbers (renders, why, leaks, layout shifts) still work in any browser, CPU / GC / heap need Chrome or Edge.', fix: 'Install Google Chrome (or Microsoft Edge).' };
+  found['tool.adb'] = tools.adb
+    ? { level: 'ok', text: `adb ${tools.adb} (perf web android: Chrome on the phone by USB)` }
+    : { level: 'ok', text: 'adb not found: only needed for perf web android (phones on the same Wi-Fi work without it).' };
+  found['project.nodeModules'] = scan.checks.nodeModules
+    ? { level: 'ok', text: 'node_modules installed' }
+    : { level: 'error', text: 'node_modules missing.', fix: 'Install the dependencies:', action: 'yarn-install', actionLabel: 'Run yarn install' };
+  found['project.bundler'] = scan.checks.bundlerInstalled
+    ? { level: 'ok', text: `${project.bundler === 'cra' ? 'react-scripts and webpack-dev-server' : project.bundler === 'vite' ? 'vite' : 'webpack, webpack-cli and webpack-dev-server'} installed` }
+    : { level: 'error', text: `The ${project.bundler ?? 'bundler'} packages perf web runs are not installed in the project.`, fix: project.bundler === 'vite' ? '<code>yarn add -D vite</code>' : '<code>yarn add -D webpack-cli webpack-dev-server</code> (perf web serves the production build with the project\'s own devServer settings).' };
+  found['project.profiling'] = scan.checks.reactDomProfiling
+    ? { level: 'ok', text: `React ${esc(scan.checks.react)} with react-dom/profiling (render times per component)` }
+    : { level: 'warn', text: 'react-dom/profiling not found: renders are still counted, but without times.', fix: 'React 17 or newer has it; check that react-dom is installed.' };
+  found['project.git'] = scan.checks.git
+    ? { level: 'ok', text: 'git repository (builds are told apart by commit + changes)' }
+    : { level: 'warn', text: 'Not a git repository: recordings cannot tell two builds apart.', fix: 'In the project: <code>git init && git add -A && git commit -m init</code>.' };
+  found['project.name'] = project.name?.trim() ? null : { level: 'error', text: 'Required.' };
+  found['project.bundlerConfig'] = project.bundler === 'cra' || project.bundlerConfig ? null : { level: 'error', text: `Required: the project's ${project.bundler === 'vite' ? 'vite.config.*' : 'webpack.config.js'}.` };
+  const port = Number(project.port);
+  found['project.port'] = Number.isInteger(port) && port >= 1024 && port <= 65535 && port !== 8098 && port !== 8099
+    ? null
+    : { level: 'error', text: 'A port from 1024 to 65535 (8098 and 8099 are perf-tool\'s own). Use the one the backend allows for local development (CORS).' };
+  project.variants.forEach((variant, index) => {
+    const bad = Object.keys(variant.env ?? {}).filter(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name));
+    if (bad.length) found[`v.${index}.env`] = { level: 'error', text: `Not valid variable names: ${esc(bad.join(', '))}` };
+  });
+  if (state.multi && project.variants.length > 1 && !project.variants.some(variant => variant.id === project.defaultVariant)) {
+    found.default = { level: 'error', text: 'Choose the default variant (built when no --variant is given).' };
+  }
+  return found;
+}
+
 function issues() {
   const scan = state.scan;
   const project = state.project;
   const found = {};
   if (!scan || !project) return found;
+  if (project.kind === 'web') return webIssues(scan, project);
   const tools = scan.tools;
   const anyIos = project.variants.some(variant => variant.ios);
   const anyAndroid = project.variants.some(variant => variant.android);
@@ -268,7 +311,9 @@ function renderHints() {
 
 function renderChecks() {
   const found = issues();
-  const keys = ['tool.node', 'tool.xcode', 'tool.pod', 'tool.adb', 'project.nodeModules', 'project.pods', 'project.git'];
+  const keys = isWebProject()
+    ? ['tool.node', 'tool.chrome', 'tool.adb', 'project.nodeModules', 'project.bundler', 'project.profiling', 'project.git']
+    : ['tool.node', 'tool.xcode', 'tool.pod', 'tool.adb', 'project.nodeModules', 'project.pods', 'project.git'];
   $('checks').replaceChildren(...keys.map(key => {
     const issue = found[key];
     const symbol = { ok: '✓', warn: '!', error: '✗' }[issue.level];
@@ -307,7 +352,54 @@ function field({ label, help, value, onInput, hint, placeholder, suggestions, wi
     hint ? h('div', { class: 'hint', 'data-hint': hint }) : null);
 }
 
+function renderWebProjectFields() {
+  const project = state.project;
+  const found = state.scan.found;
+  const bundlerSelect = h('select', { 'aria-label': 'Bundler', onchange: event => { project.bundler = event.target.value; renderAll(); } },
+    [['webpack', 'webpack (own webpack.config.js)'], ['vite', 'Vite'], ['cra', 'Create React App (react-scripts)']]
+      .map(([value, text]) => h('option', { value, selected: project.bundler === value }, text)));
+  $('projectFields').replaceChildren(...[
+    field({ label: 'Project name', help: 'Shown on the dashboard and used for the cache folders. Any name.', value: project.name, onInput: value => (project.name = value), hint: 'project.name' }),
+    h('div', { class: 'field' }, h('label', {}, 'Bundler', tip('How the app is built. perf web makes a production build with the probe from the project\'s own config, outside the project, and serves it with the project\'s dev-server settings (proxy, port, history fallback).')), bundlerSelect),
+    project.bundler !== 'cra'
+      ? field({ label: project.bundler === 'vite' ? 'Vite config' : 'webpack config', help: 'The project\'s own config file. The probe build wraps it (probe, React profiling build, readable component names, source maps) without changing it.', value: project.bundlerConfig, onInput: value => (project.bundlerConfig = value || null), hint: 'project.bundlerConfig', placeholder: project.bundler === 'vite' ? 'vite.config.ts' : 'webpack.config.js' })
+      : null,
+    field({ label: 'App port', help: 'The port the probe build is served on (http://localhost:<port>). Keep the one the project uses for development: backends usually allow only that origin (CORS).', value: String(project.port ?? ''), onInput: value => (project.port = Number(value) || value), hint: 'project.port', placeholder: '8080' }),
+    field({ label: 'Source folders', help: 'Folders with the app\'s components, comma separated. Used to link renders, leaks and slow code to source files, for the React Compiler report and for Code health. In-house packages can be added as node_modules/<package>/src.', value: project.sourceDirs.join(', '), onInput: value => (project.sourceDirs = value.split(',').map(item => item.trim()).filter(Boolean)), wide: true,
+      suggestions: found.sourceDirCandidates.map(value => ({ value: [...new Set([...project.sourceDirs, value])].join(', '), label: `+ ${value}` })) })
+  ].filter(Boolean));
+}
+
+const envText = env => Object.entries(env ?? {}).map(([name, value]) => `${name}=${value}`).join('\n');
+const parseEnv = text => Object.fromEntries(String(text).split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('#')).map(line => {
+  const index = line.indexOf('=');
+  return index === -1 ? [line, ''] : [line.slice(0, index).trim().replace(/^export\s+/, ''), line.slice(index + 1).trim().replace(/^(['"])(.*)\1$/, '$2')];
+}));
+
+function renderWebVariants() {
+  const project = state.project;
+  const sources = new Map((state.scan.found.variantSources ?? []).map(item => [item.id, item.source]));
+  $('variants').replaceChildren(...project.variants.map((variant, index) => h('div', { class: 'variant' },
+    h('div', { class: 'variant-head' },
+      h('div', { class: 'grow' }, field({ label: state.multi ? 'Variant name' : 'Name', help: 'Short name used in commands: perf web --variant <name> and yarn perf:web:<name>. Letters, digits, . _ -', value: variant.id, onInput: value => { if (project.defaultVariant === variant.id) project.defaultVariant = value; variant.id = value; } })),
+      state.multi ? h('label', { class: 'switch' }, h('input', { type: 'radio', name: 'default', checked: project.defaultVariant === variant.id, onchange: () => { project.defaultVariant = variant.id; renderHints(); } }), 'Default', tip('Built when the command has no --variant.')) : null,
+      state.multi && project.variants.length > 1 ? h('button', { onclick: () => { project.variants.splice(index, 1); renderAll(); } }, 'Remove') : null),
+    h('div', { class: 'hint', 'data-hint': 'default' }),
+    h('div', { class: 'fields' },
+      h('div', { class: 'field wide' },
+        h('label', {}, 'Environment', tip('Variables the build gets, one NAME=value per line — what the CI job or the package.json script sets (SITE_ID, REACT_APP_ENV…). Secrets the config reads from its own files do not belong here.')),
+        h('textarea', { 'aria-label': `Environment of ${variant.id}`, placeholder: 'SITE_ID=BRAND\nREACT_APP_ENV=staging', oninput: event => { variant.env = parseEnv(event.target.value); renderHints(); } }, envText(variant.env)),
+        h('div', { class: 'hint', 'data-hint': `v.${index}.env` }),
+        sources.get(variant.id) ? h('div', { class: 'hint muted' }, `Found in ${sources.get(variant.id)}`) : null),
+      project.bundler === 'vite'
+        ? field({ label: 'Vite mode', help: 'vite build --mode <mode> (loads .env.<mode>). Optional.', value: variant.mode ?? '', onInput: value => (variant.mode = value || null), placeholder: '(production)' })
+        : null)
+  )));
+  $('addVariantRow').hidden = !state.multi;
+}
+
 function renderProjectFields() {
+  if (isWebProject()) return renderWebProjectFields();
   const project = state.project;
   const found = state.scan.found;
   const envKindSelect = h('select', { 'aria-label': 'Env handling', onchange: event => { project.envKind = event.target.value; renderAll(); } },
@@ -327,9 +419,10 @@ function renderProjectFields() {
   ].filter(Boolean));
 }
 
-const blankVariant = id => ({ id, env: null, ios: null, android: null });
+const blankVariant = id => (isWebProject() ? { id, env: {}, mode: null } : { id, env: null, ios: null, android: null });
 
 function renderVariants() {
+  if (isWebProject()) return renderWebVariants();
   const project = state.project;
   const found = state.scan.found;
   const teamSuggestions = found.teams.map(team => ({ value: team.id, label: `${team.name}${team.certificate ? '' : ' (no certificate)'}` }));
@@ -398,7 +491,7 @@ function renderVariants() {
 function renderMultiNote() {
   const others = state.found.filter(item => !state.project.variants.some(variant => variant.id === item.id));
   $('multiNote').textContent = state.multi
-    ? 'Each domain can have its own env file, iOS scheme, bundle id and team, and Android flavor.'
+    ? isWebProject() ? 'Each variant builds with its own environment (brand, API environment…).' : 'Each domain can have its own env file, iOS scheme, bundle id and team, and Android flavor.'
     : state.found.length > 1
       ? `The scan found ${state.found.length} domains (${state.found.map(item => item.id).join(', ')}). Turn on Multi-domain to set them all up; now only ${state.project.variants[0]?.id} is used.`
       : others.length ? '' : 'One app, one set of settings.';
@@ -452,14 +545,22 @@ async function scan() {
       state.multi = result.saved.variants.length > 1;
       $('scanStatus').textContent = `Loaded the saved settings of ${result.repo}. The scan results are offered as suggestions.`;
     } else {
-      // One domain by default: the one the project builds now (or the first found).
       const project = structuredClone(result.project);
-      const main = project.variants.find(variant => variant.id === project.defaultVariant) ?? project.variants[0];
-      project.variants = main ? [main] : [blankVariant('app')];
-      project.defaultVariant = project.variants[0].id;
-      state.project = project;
-      state.multi = false;
-      $('scanStatus').textContent = `Scanned ${result.repo} (React Native ${result.checks.reactNative}). Check the settings below; fields marked in red still need a value.`;
+      if (project.kind === 'web') {
+        // Web: every variant the scan found (each CI job's environment), the preferred one as default.
+        state.project = project;
+        state.multi = project.variants.length > 1;
+      } else {
+        // One domain by default: the one the project builds now (or the first found).
+        const main = project.variants.find(variant => variant.id === project.defaultVariant) ?? project.variants[0];
+        project.variants = main ? [main] : [blankVariant('app')];
+        project.defaultVariant = project.variants[0].id;
+        state.project = project;
+        state.multi = false;
+      }
+      $('scanStatus').textContent = result.project.kind === 'web'
+        ? `Scanned ${result.repo} (React ${result.checks.react}, ${result.project.bundler ?? 'bundler not found'}, ${result.project.variants.length} variant${result.project.variants.length === 1 ? '' : 's'} found). Check the settings below; fields marked in red still need a value.`
+        : `Scanned ${result.repo} (React Native ${result.checks.reactNative}). Check the settings below; fields marked in red still need a value.`;
     }
     $('multi').checked = state.multi;
     state.pasted = {};
@@ -513,6 +614,31 @@ function renderDone(result) {
   $('doneInfo').innerHTML = `Saved for <code>${esc(repo)}</code>. The <code>perf</code> command is linked at <code>${esc(cli.link)}</code>.${cli.pathNote ? `<br><span class="hint warn">${esc(cli.pathNote)}</span>` : ''}`;
   const anyIos = state.project.variants.some(variant => variant.ios);
   const anyAndroid = state.project.variants.some(variant => variant.android);
+  if (isWebProject()) {
+    const variants = state.project.variants;
+    const select = h('select', { id: 'startVariant', 'aria-label': 'Variant to start' }, variants.map(variant => h('option', { value: variant.id, selected: variant.id === state.project.defaultVariant }, variant.id)));
+    $('steps').replaceChildren(
+      h('li', {}, 'Start it from here: ', variants.length > 1 ? select : null, ' ', h('button', { class: 'primary', onclick: async event => {
+        event.target.disabled = true;
+        try {
+          const started = await api('/api/start-web', { repo, variant: variants.length > 1 ? $('startVariant').value : variants[0]?.id });
+          toast(`perf web is starting — the dashboard opens at http://localhost:8099 (log: ${started.log})`);
+        } catch (error) { toast(error.message); }
+        event.target.disabled = false;
+      } }, 'Start perf web')),
+      h('li', { html: `Or in a <b>new</b> Terminal window: <code>cd ${esc(repo)}</code> and <code>${esc(commands.main[0]?.command ?? 'perf web')}</code>.` }),
+      h('li', { html: 'It makes a production build with the probe (outside the project), serves it on the app\'s port, opens Chrome and the dashboard at <code>http://localhost:8099</code>. Phones on the same Wi-Fi open the network address the dashboard shows; <code>perf web android</code> opens it in Chrome on a USB phone.' }),
+      h('li', { html: 'In the dashboard: <b>Live</b> shows what renders and why, layout, CPU and GC; <b>Memory leaks</b> and <b>Code health</b> have their own tabs; <b>Record</b> saves a session for before / after.' }),
+      h('li', { html: '<b>Stop perf web</b> on the dashboard (or Ctrl-C in the Terminal) stops everything.' })
+    );
+    $('commands').replaceChildren(...commands.main.map(commandItem));
+    $('scripts').replaceChildren(...commands.scripts.map(command => commandItem({ command })));
+    $('otherCommands').replaceChildren(...commands.other.map(commandItem));
+    allCommands = [...commands.main.map(item => `${item.command}    # ${item.what}`), '', ...commands.scripts, '', ...commands.other.map(item => `${item.command}    # ${item.what}`)].join('\n');
+    $('doneSection').hidden = false;
+    $('doneSection').scrollIntoView({ behavior: 'smooth' });
+    return;
+  }
   $('steps').replaceChildren(...[
     h('li', { html: 'Open a <b>new</b> Terminal window (so it finds the <code>perf</code> command).' }),
     h('li', { html: `<code>cd ${esc(repo)}</code>` }),
