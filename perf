@@ -14,7 +14,8 @@
 #                                        over adb on Wi-Fi (no serial: pick from a list; a phone on
 #                                        the cable is switched to Wi-Fi unless --cable)
 #   perf web [chrome|android|none] [--variant <name>] [--port N]
-#                                        React web app: production build + probe on the app's port,
+#                                        React web app: production build + probe on the app's port
+#                                        (no --variant: pick from a list, default = production),
 #                                        dashboard, and Chrome on this Mac (android: Chrome on the phone
 #                                        connected by USB; none: open it yourself — Safari, a phone on the
 #                                        same Wi-Fi). Outside a project the dashboard asks for one.
@@ -592,6 +593,35 @@ choose_project_on_dashboard() {
   echo "Project: $REPO${VARIANT:+ ($VARIANT)}"
 }
 
+# perf web without --variant in a Terminal, for a project with several variants (brands ×
+# environments): a menu, the default first; Enter starts the default.
+pick_web_variant() {
+  [[ -z "$VARIANT" && -t 0 && -t 2 ]] || return 0
+  "$NODE" "$TOOL/lib/config.mjs" has --repo "$REPO" || return 0
+  local ids=() labels=() id env mark
+  while IFS=$'\t' read -r id env mark; do
+    [[ -n "$id" ]] || continue
+    if [[ "$mark" == default ]]; then
+      ids=("$id" "${ids[@]+"${ids[@]}"}"); labels=("$(printf '%-22s %s  (default)' "$id" "$env")" "${labels[@]+"${labels[@]}"}")
+    else
+      ids+=("$id"); labels+=("$(printf '%-22s %s' "$id" "$env")")
+    fi
+  done <<<"$("$NODE" "$TOOL/lib/config.mjs" variants --repo "$REPO")"
+  local count=${#ids[@]}
+  [[ $count -gt 1 ]] || return 0
+  echo "Start which variant?" >&2
+  local i
+  for ((i = 0; i < count; i++)); do printf '  %2d) %s\n' $((i + 1)) "${labels[$i]}" >&2; done
+  local choice
+  while true; do
+    read -r -p "Choose 1-$count [Enter = 1]: " choice || exit 130
+    choice="${choice:-1}"
+    [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= count)) && break
+    echo "Enter a number from 1 to $count." >&2
+  done
+  VARIANT="${ids[$((choice - 1))]}"
+}
+
 lan_addresses() {
   "$NODE" -e 'const os = require("os"); for (const list of Object.values(os.networkInterfaces())) for (const item of list ?? []) if (item.family === "IPv4" && !item.internal) console.log(item.address)'
 }
@@ -740,6 +770,12 @@ case "$command" in
     if [[ ! -f "$REPO/package.json" ]] || ! grep -q '"react"' "$REPO/package.json"; then
       choose_project_on_dashboard
     else
+      # A project seen for the first time is scanned and saved before the menu can list its variants.
+      if [[ -f "$REPO/package.json" ]] && ! "$NODE" "$TOOL/lib/config.mjs" has --repo "$REPO"; then
+        echo "First run for $REPO: scanning the project (perf init shows and edits the result)…"
+        "$NODE" "$TOOL/lib/init.mjs" --repo "$REPO" --auto || fail "the scan could not set up the project — run 'perf init' and fill in the missing fields"
+      fi
+      pick_web_variant
       [[ $with_server == 1 ]] && start_web_server
     fi
     load_variant

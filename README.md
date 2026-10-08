@@ -123,7 +123,7 @@ behaviour.
 
 ```sh
 perf web                          # this Mac: production build + probe, Chrome and the dashboard
-perf web --variant efbet-pre_prod # a chosen variant (domain / environment)
+perf web --variant efbet-prod     # a chosen variant (without it: a list, Enter = default)
 perf web android                  # also opens it in Chrome on the Android phone connected by USB
 perf web none                     # build and serve only; open it yourself (Safari, any phone)
 ```
@@ -132,7 +132,7 @@ The project is set up like a React Native one: the setup page (or the first `per
 the bundler (webpack, Vite, Create React App), its config file, the app's port and one **variant
 per environment** the CI jobs or `package.json` scripts build (e.g. `SITE_ID=EFBET` +
 `REACT_APP_ENV=pre_prod` → variant `efbet-pre_prod`). The setup page shows each variant's
-environment for editing and which one is the **Default** (built without `--variant`); it also has
+environment for editing and which one is the **Default** (production; `perf web` in a Terminal lists the variants and Enter starts the default); it also has
 **Start perf web**, so no Terminal is needed. Run outside a project, `perf web` opens the dashboard
 with a list of the saved projects and their variants to start from.
 
