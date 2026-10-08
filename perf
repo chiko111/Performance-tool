@@ -9,8 +9,10 @@
 #                                        Server + Release build with probe + install + dashboard
 #                                        (no device name: pick from a list; outside a
 #                                        terminal the one iPhone connected by cable)
-#   perf android [serial] [--variant <name>]
-#                                        Server + Android release with probe + install + dashboard
+#   perf android [serial|address] [--variant <name>] [--cable]
+#                                        Server + Android release with probe + install + dashboard,
+#                                        over adb on Wi-Fi (no serial: pick from a list; a phone on
+#                                        the cable is switched to Wi-Fi unless --cable)
 #   perf setup [--remove]                Add (or remove) the yarn perf:* scripts in package.json
 #   perf devices                         List iOS devices/simulators and Android devices
 #   perf server [android]                Only the live dashboard (http://localhost:8099)
@@ -382,6 +384,131 @@ build_ios() {
   fi
 }
 
+# Android runs over adb on Wi-Fi by default, so the host-side sampling (threads, frames, GC, memory,
+# temperature), the install and Auto replays keep working without a cable. `perf android` lists the
+# phones it can use: on the cable (switched to adb over TCP, then reached by its Wi-Fi address),
+# already connected over Wi-Fi, used before (saved), or announcing Android 11+ Wireless debugging.
+ANDROID_SAVED="$HOME/Library/Caches/perf-tool/android-devices" # "address<TAB>model", newest first
+is_wireless_serial() { [[ "$1" == *:* || "$1" == *._adb-tls-connect.* ]]; }
+adb_serials() { adb devices | awk 'NR > 1 && $2 == "device" { print $1 }'; }
+android_model() { adb -s "$1" shell getprop ro.product.model 2>/dev/null | tr -d '\r' || true; }
+
+# Connects an address and waits until adb sees the phone. Returns 1 when it does not answer.
+connect_adb_address() {
+  local address="$1"
+  for _ in 1 2 3 4 5; do
+    [[ "$address" == *:* ]] && { adb connect "$address" >/dev/null 2>&1 || true; }
+    [[ "$(adb -s "$address" get-state 2>/dev/null || true)" == "device" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+save_android_device() {
+  local address="$1" model="$2"
+  mkdir -p "$(dirname "$ANDROID_SAVED")"
+  { printf '%s\t%s\n' "$address" "$model"; grep -v -F "$address"$'\t' "$ANDROID_SAVED" 2>/dev/null || true; } | head -8 >"$ANDROID_SAVED.tmp"
+  mv "$ANDROID_SAVED.tmp" "$ANDROID_SAVED"
+}
+
+# Phones to choose from, as "kind<TAB>serial or address<TAB>model<TAB>note".
+android_candidates() {
+  local serial model address name seen=" "
+  while read -r serial; do
+    [[ -n "$serial" ]] || continue
+    model="$(android_model "$serial")"
+    if is_wireless_serial "$serial"; then printf 'wifi\t%s\t%s\tWi-Fi, connected\n' "$serial" "$model"
+    elif [[ "$serial" == emulator-* ]]; then printf 'emulator\t%s\t%s\temulator\n' "$serial" "$model"
+    else printf 'cable\t%s\t%s\tcable, switches to Wi-Fi\n' "$serial" "$model"; fi
+    seen+="$serial "
+  done <<<"$(adb_serials || true)"
+  while IFS=$'\t' read -r address model; do
+    [[ -n "$address" && "$seen" != *" $address "* ]] || continue
+    printf 'saved\t%s\t%s\tWi-Fi, %s (used before)\n' "$address" "$model" "$address"
+    seen+="$address "
+  done < <(cat "$ANDROID_SAVED" 2>/dev/null || true)
+  while read -r name address; do
+    # A paired phone adb already connected through Wireless debugging is listed as name._adb-tls-connect…
+    [[ -n "$address" && "$seen" != *" $address "* && "$seen" != *" $name."* ]] || continue
+    printf 'mdns\t%s\t%s\tWi-Fi, %s (Wireless debugging)\n' "$address" "$name" "$address"
+  done <<<"$(adb mdns services 2>/dev/null | awk '/_adb-tls-connect/ { print $1, $NF }' || true)"
+}
+
+# Switches a phone on the cable to adb over Wi-Fi. Stays on the cable when the phone has no Wi-Fi
+# address or the Mac cannot reach it.
+android_cable_to_wifi() {
+  local serial="$1" model="$2" ip
+  ip="$(adb -s "$serial" shell ip -f inet addr show wlan0 2>/dev/null | awk '/inet / { sub(/\/.*/, "", $2); print $2; exit }' || true)"
+  if [[ -z "$ip" ]]; then
+    echo "The phone is not on Wi-Fi: staying on the cable." >&2
+    export ANDROID_SERIAL="$serial"
+    return
+  fi
+  echo "Switching ${model:-$serial} to adb over Wi-Fi ($ip:5555)…"
+  adb -s "$serial" tcpip 5555 >/dev/null
+  sleep 2
+  if connect_adb_address "$ip:5555"; then
+    export ANDROID_SERIAL="$ip:5555"
+    save_android_device "$ANDROID_SERIAL" "$model"
+    echo "adb over Wi-Fi: $ANDROID_SERIAL — the cable can be unplugged."
+  else
+    echo "This Mac cannot reach the phone at $ip (another network?): staying on the cable." >&2
+    export ANDROID_SERIAL="$serial"
+  fi
+}
+
+use_android_device() {
+  local kind="$1" serial="$2" model="$3"
+  case "$kind" in
+    cable) android_cable_to_wifi "$serial" "$model" ;;
+    emulator) export ANDROID_SERIAL="$serial" ;;
+    *)
+      connect_adb_address "$serial" ||
+        fail "could not reach ${model:-$serial} at $serial. It must be on the same Wi-Fi as this Mac; after a phone restart connect the cable once (Android 11+: or pair it under Developer options → Wireless debugging with 'adb pair')"
+      export ANDROID_SERIAL="$serial"
+      model="${model:-$(android_model "$serial")}"
+      [[ "$serial" == *:* ]] && save_android_device "$serial" "$model"
+      echo "Using ${model:-$serial} over Wi-Fi ($serial)."
+      ;;
+  esac
+}
+
+# Sets ANDROID_SERIAL. A serial or address passed on the command line is used as is (a cable
+# serial is switched to Wi-Fi); otherwise a menu in a terminal, or the only phone there is.
+resolve_android_target() {
+  local given="${1:-}"
+  if [[ -n "$given" ]]; then
+    if is_wireless_serial "$given"; then use_android_device wifi "$given" ""
+    elif [[ "$given" == emulator-* ]]; then use_android_device emulator "$given" ""
+    else use_android_device cable "$given" "$(android_model "$given")"; fi
+    return
+  fi
+  local kinds=() serials=() models=() labels=() kind serial model note
+  while IFS=$'\t' read -r kind serial model note; do
+    [[ -n "$kind" ]] || continue
+    kinds+=("$kind"); serials+=("$serial"); models+=("$model")
+    labels+=("$(printf '%-24s %s' "${model:-$serial}" "$note")")
+  done <<<"$(android_candidates)"
+  local count=${#kinds[@]}
+  ((count > 0)) || fail "no Android phone found: connect it by cable once (it is then switched to Wi-Fi), or pair it under Developer options → Wireless debugging ('adb pair')"
+  local choice=1
+  if [[ -t 0 && -t 2 ]]; then
+    echo "Run on:" >&2
+    local i
+    for ((i = 0; i < count; i++)); do printf '  %2d) %s\n' $((i + 1)) "${labels[$i]}" >&2; done
+    while true; do
+      read -r -p "Choose 1-$count [Enter = 1]: " choice || exit 130
+      choice="${choice:-1}"
+      [[ "$choice" =~ ^[0-9]+$ ]] && ((choice >= 1 && choice <= count)) && break
+      echo "Enter a number from 1 to $count." >&2
+    done
+  elif ((count > 1)); then
+    printf '  %s\n' "${labels[@]}" >&2
+    fail "several Android phones: pass the serial or address, e.g. perf android ${serials[0]}"
+  fi
+  use_android_device "${kinds[$((choice - 1))]}" "${serials[$((choice - 1))]}" "${models[$((choice - 1))]}"
+}
+
 build_android() {
   "$NODE" "$TOOL/lib/prepare.mjs" --repo "$REPO" --out "$GEN" ${ENV_FILE:+--env-file "$ENV_FILE"}
   [[ -n "$ANDROID_PACKAGE" ]] || fail "variant '$VARIANT' has no Android settings — perf init to add them"
@@ -396,6 +523,7 @@ build_android() {
 command="${1:-help}"
 shift || true
 with_server=1
+android_cable=0
 positional=()
 expect_team=0
 expect_variant=0
@@ -406,6 +534,7 @@ for arg in "$@"; do
   elif [[ "$arg" == "--team" ]]; then expect_team=1
   elif [[ "$arg" == "--variant" || "$arg" == "--brand" ]]; then expect_variant=1
   elif [[ "$arg" == "--no-server" ]]; then with_server=0
+  elif [[ "$arg" == "--cable" ]]; then android_cable=1
   else positional+=("$arg"); fi
 done
 set -- "${positional[@]+"${positional[@]}"}"
@@ -428,7 +557,12 @@ case "$command" in
     require adb
     check_for_update
     load_variant
-    [[ -n "${1:-}" ]] && export ANDROID_SERIAL="$1" # adb, Gradle install and the server honour it
+    # ANDROID_SERIAL: adb, the Gradle install and the server all honour it.
+    if [[ $android_cable == 1 ]]; then
+      [[ -n "${1:-}" ]] && export ANDROID_SERIAL="$1"
+    else
+      resolve_android_target "${1:-}"
+    fi
     adb get-state >/dev/null 2>&1 || fail "no Android device connected (or several: pass the serial, see 'perf devices')"
     trap stop_server EXIT
     trap 'exit 130' INT TERM

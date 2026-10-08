@@ -235,6 +235,22 @@ static double processStartEpochMs(void)
   return @"(unnamed threads)";
 }
 
+// Names the device in the dashboard's device list. A simulator reports "arm64" as its machine, so
+// its model and name come from the environment the simulator gives the process.
+- (NSDictionary *)deviceInfo
+{
+#if TARGET_OS_SIMULATOR
+  NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
+  return @{
+    @"simulator" : @YES,
+    @"model" : environment[@"SIMULATOR_MODEL_IDENTIFIER"] ?: _model,
+    @"name" : environment[@"SIMULATOR_DEVICE_NAME"] ?: @""
+  };
+#else
+  return @{@"simulator" : @NO, @"model" : _model};
+#endif
+}
+
 - (void)sample
 {
   thread_act_array_t threads;
@@ -314,7 +330,8 @@ static double processStartEpochMs(void)
     @"ui" : frames,
     @"memoryMb" : @(round(footprintMb * 10) / 10),
     // iOS exposes no temperature, only the thermal state: 0 nominal, 1 fair, 2 serious, 3 critical.
-    @"thermal" : @{@"state" : @(NSProcessInfo.processInfo.thermalState)}
+    @"thermal" : @{@"state" : @(NSProcessInfo.processInfo.thermalState)},
+    @"device" : [self deviceInfo]
   };
 
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:_endpoint];

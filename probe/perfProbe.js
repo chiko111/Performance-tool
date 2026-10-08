@@ -149,6 +149,217 @@ function attachStore(store) {
   };
 }
 
+// ---------- Inspector ----------
+// Request / response bodies and socket messages for live debugging in the dashboard's Inspector
+// tab. Kept only while the Inspector is on there (the server says so in its reply to /js), sent
+// with the next flush outside the samples, so recordings and exports never contain them.
+// Credential headers (Authorization, Cookie, STOMP passcode…) and password fields of request
+// bodies are masked.
+
+const INSPECT_MAX_CHARS = 200000; // per body
+const INSPECT_MAX_QUEUED = 500;
+const INSPECT_MAX_QUEUED_CHARS = 4000000;
+const SECRET_HEADER = /^(authorization|proxy-authorization|cookie|set-cookie|login|passcode|x-auth-token|x-api-key)$/i;
+const SECRET_FIELD = /pass(word|code)/i;
+let inspecting = false;
+let inspectSequence = 0;
+let inspectQueue = [];
+let inspectQueuedChars = 0;
+let inspectDropped = 0;
+
+function setInspecting(on) {
+  inspecting = on;
+  if (!on) {
+    inspectQueue = [];
+    inspectQueuedChars = 0;
+    inspectDropped = 0;
+  }
+}
+
+function inspectPush(entry) {
+  if (!inspecting) return;
+  const chars = (entry.requestBody?.length || 0) + (entry.responseBody?.length || 0) + (entry.body?.length || 0);
+  inspectQueue.push({ id: `${sessionId}-${(inspectSequence += 1)}`, at: Date.now(), ...entry });
+  inspectQueuedChars += chars;
+  while (inspectQueue.length > INSPECT_MAX_QUEUED || (inspectQueuedChars > INSPECT_MAX_QUEUED_CHARS && inspectQueue.length > 1)) {
+    const dropped = inspectQueue.shift();
+    inspectQueuedChars -= (dropped.requestBody?.length || 0) + (dropped.responseBody?.length || 0) + (dropped.body?.length || 0);
+    inspectDropped += 1;
+  }
+}
+
+function takeInspected() {
+  const taken = { entries: inspectQueue, dropped: inspectDropped };
+  inspectQueue = [];
+  inspectQueuedChars = 0;
+  inspectDropped = 0;
+  return taken;
+}
+
+function clip(text) {
+  if (typeof text !== 'string') return { body: null, truncated: 0 };
+  return text.length > INSPECT_MAX_CHARS ? { body: text.slice(0, INSPECT_MAX_CHARS), truncated: text.length } : { body: text, truncated: 0 };
+}
+
+function maskHeaders(headers) {
+  const masked = {};
+  for (const [name, value] of Object.entries(headers)) masked[name] = SECRET_HEADER.test(name) ? '***' : value;
+  return masked;
+}
+
+function maskFields(value) {
+  if (Array.isArray(value)) return value.map(maskFields);
+  if (!value || typeof value !== 'object') return value;
+  const masked = {};
+  for (const [key, inner] of Object.entries(value)) masked[key] = SECRET_FIELD.test(key) ? '***' : maskFields(inner);
+  return masked;
+}
+
+// JSON and form-encoded request bodies; anything else is shown as sent.
+function maskBody(text) {
+  if (typeof text !== 'string' || !SECRET_FIELD.test(text)) return text;
+  try {
+    return JSON.stringify(maskFields(JSON.parse(text)));
+  } catch {
+    return text.replace(/([^&=?\s]*pass(?:word|code)[^&=]*=)[^&]*/gi, '$1***');
+  }
+}
+
+function parseHeaderBlock(text) {
+  const headers = {};
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const separator = line.indexOf(':');
+    if (separator > 0) headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+  }
+  return headers;
+}
+
+// UTF-8 bytes as text, without relying on TextDecoder (not every Hermes version has it).
+function bytesToText(data, maxChars) {
+  if (typeof data === 'string') return data;
+  if (!data || typeof data.byteLength !== 'number') return null;
+  const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const length = Math.min(bytes.length, maxChars);
+  if (typeof TextDecoder !== 'undefined') return new TextDecoder().decode(bytes.subarray(0, length));
+  let binary = '';
+  for (let index = 0; index < length; index += 8192) binary += String.fromCharCode(...bytes.subarray(index, Math.min(length, index + 8192)));
+  try {
+    return decodeURIComponent(escape(binary));
+  } catch {
+    return binary;
+  }
+}
+
+function requestBodyText(body) {
+  if (body == null) return null;
+  if (typeof body === 'string') return maskBody(body);
+  if (typeof FormData !== 'undefined' && body instanceof FormData) return '(FormData)';
+  if (typeof body.byteLength === 'number') return bytesToText(body, INSPECT_MAX_CHARS);
+  return `(${body.constructor?.name || typeof body})`;
+}
+
+// fetch in React Native reads the response as a Blob; XMLHttpRequest users get text or JSON.
+function readResponseBody(request, done) {
+  try {
+    const type = request.responseType;
+    if (!type || type === 'text') return done(request.responseText);
+    if (type === 'json') return done(JSON.stringify(request.response));
+    if (type === 'arraybuffer') return done(bytesToText(request.response, INSPECT_MAX_CHARS));
+    const blob = request.response;
+    if (type === 'blob' && blob && typeof FileReader !== 'undefined') {
+      const reader = new FileReader();
+      reader.onload = () => done(typeof reader.result === 'string' ? reader.result : null);
+      reader.onerror = () => done(null);
+      reader.readAsText(blob.size > INSPECT_MAX_CHARS ? blob.slice(0, INSPECT_MAX_CHARS) : blob);
+      return undefined;
+    }
+  } catch {
+    // unreadable body: shown as empty
+  }
+  return done(null);
+}
+
+function inspectRequest(request, xhr, startedAt) {
+  const ms = Date.now() - startedAt;
+  const status = xhr.status;
+  let responseHeaders = {};
+  try {
+    responseHeaders = maskHeaders(parseHeaderBlock(xhr.getAllResponseHeaders()));
+  } catch {
+    responseHeaders = {};
+  }
+  readResponseBody(xhr, text => {
+    const response = clip(text);
+    const sent = clip(request.body);
+    inspectPush({
+      kind: 'http',
+      method: request.method.toUpperCase(),
+      url: request.url,
+      endpoint: endpointKey(request.method, request.url),
+      status,
+      ms,
+      requestHeaders: maskHeaders(request.headers),
+      requestBody: sent.body,
+      requestTruncated: sent.truncated,
+      responseHeaders,
+      responseBody: response.body,
+      responseTruncated: response.truncated
+    });
+  });
+}
+
+// Every frame of a STOMP message with all its headers and body, or null when it is not STOMP.
+function stompFramesFull(text) {
+  const frames = [];
+  for (const raw of text.split('\0')) {
+    const frame = raw.replace(/^[\r\n]+/, '');
+    if (!frame) continue;
+    const blank = frame.search(/\r?\n\r?\n/);
+    const head = blank === -1 ? frame : frame.slice(0, blank);
+    const lines = head.split(/\r?\n/);
+    if (!STOMP_COMMANDS.has(lines[0])) return frames.length ? frames : null;
+    const headers = {};
+    for (const line of lines.slice(1)) {
+      const separator = line.indexOf(':');
+      if (separator > 0) headers[line.slice(0, separator)] ??= line.slice(separator + 1);
+    }
+    const body = blank === -1 ? '' : frame.slice(blank).replace(/^\r?\n\r?\n/, '');
+    frames.push({ command: lines[0], headers, body });
+  }
+  return frames;
+}
+
+function inspectSocketData(socket, direction, data, subscriptions) {
+  const text = bytesToText(data, INSPECT_MAX_CHARS);
+  if (text == null) {
+    inspectPush({ kind: 'ws', socket, direction, topic: NON_STOMP_TOPIC, destination: null, command: null, headers: {}, body: `(binary, ${dataBytes(data)} bytes)`, bytes: dataBytes(data) });
+    return;
+  }
+  const frames = stompFramesFull(text);
+  if (!frames) {
+    if (!text.trim()) return; // heartbeat
+    const { body, truncated } = clip(text);
+    inspectPush({ kind: 'ws', socket, direction, topic: NON_STOMP_TOPIC, destination: null, command: null, headers: {}, body, truncated, bytes: dataBytes(data) });
+    return;
+  }
+  for (const frame of frames) {
+    const destination = frame.headers.destination ?? subscriptions.get(frame.headers.subscription) ?? null;
+    const { body, truncated } = clip(frame.command === 'CONNECT' || frame.command === 'STOMP' ? '' : frame.body);
+    inspectPush({
+      kind: 'ws',
+      socket,
+      direction,
+      topic: destination ? foldPath(destination) : `(${frame.command.toLowerCase()})`,
+      destination,
+      command: frame.command,
+      headers: maskHeaders(frame.headers),
+      body,
+      truncated,
+      bytes: frame.body.length
+    });
+  }
+}
+
 // ---------- Network ----------
 // Every XMLHttpRequest (fetch and axios use it in React Native) is counted per endpoint. Ids in
 // the path and query values are folded so the same endpoint groups together. A duplicate is the
@@ -156,8 +367,21 @@ function attachStore(store) {
 // finished; the same endpoint with other parameters (another section's filterId) is not.
 
 const DUPLICATE_WINDOW_MS = 1000;
+// Both keyed by the full URL, so they must not keep every URL the app has ever requested.
 const inFlight = new Map();
-const lastFinished = new Map();
+const lastFinished = new Map(); // in finish order: the oldest entries are pruned from the front
+
+function markFinished(exact, now) {
+  const left = (inFlight.get(exact) || 1) - 1;
+  if (left > 0) inFlight.set(exact, left);
+  else inFlight.delete(exact);
+  lastFinished.delete(exact);
+  lastFinished.set(exact, now);
+  for (const [key, finishedAt] of lastFinished) {
+    if (now - finishedAt < DUPLICATE_WINDOW_MS) break;
+    lastFinished.delete(key);
+  }
+}
 
 function endpointKey(method, url) {
   const match = String(url).match(/^(?:https?:\/\/)?([^/?#]*)([^?#]*)(?:\?([^#]*))?/);
@@ -177,13 +401,26 @@ function installNetworkHook() {
   Request.prototype.__perfProbe = true;
   const open = Request.prototype.open;
   const send = Request.prototype.send;
+  const setRequestHeader = Request.prototype.setRequestHeader;
   Request.prototype.open = function (method, url, ...rest) {
-    this.__perfRequest = { method: method || 'GET', url: String(url) };
+    this.__perfRequest = { method: method || 'GET', url: String(url), headers: {} };
     return open.call(this, method, url, ...rest);
+  };
+  Request.prototype.setRequestHeader = function (name, value) {
+    if (inspecting && this.__perfRequest) this.__perfRequest.headers[String(name).toLowerCase()] = String(value);
+    return setRequestHeader.call(this, name, value);
   };
   Request.prototype.send = function (...args) {
     const request = this.__perfRequest;
     if (request && !request.url.includes(`:${PORT}/`)) {
+      const inspected = inspecting;
+      if (inspected) {
+        try {
+          request.body = requestBodyText(args[0]);
+        } catch {
+          request.body = null;
+        }
+      }
       const key = endpointKey(request.method, request.url);
       const exact = `${request.method.toUpperCase()} ${request.url}`;
       const startedAt = Date.now();
@@ -191,8 +428,7 @@ function installNetworkHook() {
       inFlight.set(exact, (inFlight.get(exact) || 0) + 1);
       this.addEventListener('loadend', () => {
         const ms = Date.now() - startedAt;
-        inFlight.set(exact, Math.max(0, (inFlight.get(exact) || 1) - 1));
-        lastFinished.set(exact, Date.now());
+        markFinished(exact, Date.now());
         let bytes = 0;
         try {
           bytes = Number(this.getResponseHeader('content-length')) || (typeof this.responseText === 'string' ? this.responseText.length : 0);
@@ -207,6 +443,13 @@ function installNetworkHook() {
         if (!this.status || this.status >= 400) entry.errors += 1;
         if (duplicate) entry.duplicates += 1;
         current.network.set(key, entry);
+        if (inspected && inspecting) {
+          try {
+            inspectRequest(request, this, startedAt);
+          } catch {
+            current.probeErrors = (current.probeErrors || 0) + 1;
+          }
+        }
       });
     }
     return send.apply(this, args);
@@ -217,7 +460,8 @@ function installNetworkHook() {
 // Messages are counted per socket and, for STOMP, per destination (topic): the SUBSCRIBE frames the
 // app sends map a subscription id to its destination, and every MESSAGE frame is charged to it. Ids
 // in the URL and the destination are folded like endpoints. Only the command and the destination /
-// subscription headers are read: header values such as auth tokens and bodies are never kept.
+// subscription headers are counted: header values such as auth tokens and bodies are never kept
+// in the samples (the Inspector shows them live, see above).
 
 const NON_STOMP_TOPIC = '(messages)';
 const MAX_HEADER_CHARS = 512;
@@ -316,6 +560,13 @@ function trackSocket(webSocket, url) {
     entry.closeCodes[code] = (entry.closeCodes[code] || 0) + 1;
   });
   webSocket.addEventListener('message', event => {
+    if (inspecting) {
+      try {
+        inspectSocketData(socket, 'in', event.data, subscriptions);
+      } catch {
+        current.probeErrors = (current.probeErrors || 0) + 1;
+      }
+    }
     try {
       const bytes = dataBytes(event.data);
       const frames = stompFrames(dataText(event.data));
@@ -342,6 +593,8 @@ function trackSocket(webSocket, url) {
           if (frame.command === 'SUBSCRIBE' && frame.headers.id && frame.headers.destination) {
             subscriptions.set(frame.headers.id, frame.headers.destination);
           }
+          // stompjs gives every subscription a new id: forget the ones the app no longer uses.
+          if (frame.command === 'UNSUBSCRIBE' && frame.headers.id) subscriptions.delete(frame.headers.id);
           if (frame.command === 'SEND') {
             const entry = socketEntry(socket, topicOf(frame));
             entry.sent += 1;
@@ -353,6 +606,7 @@ function trackSocket(webSocket, url) {
         entry.sent += 1;
         entry.sentBytes += dataBytes(data);
       }
+      if (inspecting) inspectSocketData(socket, 'out', data, subscriptions);
     } catch {
       current.probeErrors = (current.probeErrors || 0) + 1;
     }
@@ -747,6 +1001,18 @@ async function findServer() {
   return null;
 }
 
+// Names an Android device in the dashboard's device list (iOS: the native probe sends its model).
+function deviceInfo() {
+  try {
+    const { Platform } = require('react-native');
+    if (Platform.OS !== 'android') return undefined;
+    const { Brand, Manufacturer, Model } = Platform.constants;
+    return { model: Model, brand: Brand || Manufacturer, simulator: /^(sdk_|google_sdk|Android SDK built for)/.test(Model || '') || undefined };
+  } catch {
+    return undefined;
+  }
+}
+
 async function flush() {
   pending.push(snapshot());
   if (pending.length > MAX_BUFFERED) pending.splice(0, pending.length - MAX_BUFFERED);
@@ -756,19 +1022,22 @@ async function flush() {
     if (!endpoint) return;
   }
   const batch = pending.splice(0, pending.length);
+  // Inspected bodies are for watching live: lost with a failed post, never resent.
+  const inspect = inspecting ? takeInspected() : undefined;
   try {
     const response = await fetchWithTimeout(
       `${endpoint}/js`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ platform: require('react-native').Platform.OS, sessionId, build, samples: batch })
+        body: JSON.stringify({ platform: require('react-native').Platform.OS, sessionId, build, device: deviceInfo(), samples: batch, inspect })
       },
       3000
     );
     // The server answers with a command when an automatic run needs the app on a given screen.
     const reply = await response.json().catch(() => null);
     if (reply?.command?.type === 'navigate') navigateTo(reply.command.path);
+    if (reply) setInspecting(reply.inspect === true);
   } catch {
     pending.unshift(...batch);
     endpoint = null;

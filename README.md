@@ -71,6 +71,7 @@ perf ios                          # pick a connected iPhone or a simulator from 
 perf ios "iPhone 15"              # or a device / simulator by name
 perf android                      # the connected Android device
 perf android <serial>             # with several devices: the serial
+perf android --cable              # stay on the cable (no switch to adb over Wi-Fi)
 perf ios --variant brand-b        # multi-domain: a chosen domain
 ```
 
@@ -96,6 +97,21 @@ the same certificate.
 **Signing team (installing your app on an iPhone):** the Apple team that signs the probe build of your app, in this order: `--team <ID>` → `PERF_TEAM` →
 `PERF_TEAM_<DOMAIN>` → the Team ID from the setup page → a local provisioning profile for the
 bundle id.
+
+**Android runs over Wi-Fi.** Threads, frames, ART GC, memory and temperature are read over adb,
+so `perf android` keeps adb on Wi-Fi and every value, the install and Auto replays work without a
+cable. Without a serial it lists the phones it can use and you pick one (Enter = the first):
+
+- **on the cable**: switched to adb over TCP and reached by its Wi-Fi address; the cable can then
+  be unplugged. A phone without Wi-Fi, or one this Mac cannot reach, stays on the cable;
+- **connected over Wi-Fi**, or **used before** (the last 8 are saved and connected again);
+- **Wireless debugging** (Android 11+, Developer options): phones paired once with `adb pair`
+  that announce themselves on the network.
+
+The phone must be on the same network as the Mac; the server reconnects when the connection
+drops. After a phone restart adb over TCP is off again: connect the cable once (or use Wireless
+debugging). `perf android <serial or address>` skips the list; `--cable` keeps the old cable-only
+behaviour.
 
 ## Record and compare before / after
 
@@ -203,6 +219,18 @@ content that moves on its own (auto-scrolling carousels) when recording a scenar
   after a message, so a topic that keeps a screen re-rendering stands out. Opens, closes (with
   close codes) and errors per socket show reconnects. Only the STOMP command and destination are
   read: tokens, other headers and message bodies are not recorded.
+- **Crashes** (tab): every crash, ANR, kill for memory and system report of the app, one table
+  per device (named as in the device list), newest first, with the screen, memory and stack. Kept
+  for 30 days (up to 500), also after a server restart; Dismiss on the Live tab only hides them
+  there.
+- **Inspector** (tab): the bodies themselves, for debugging. Press **● Capture bodies**, then use
+  the app. *REST* lists the requests (filter by URL / method / status, or errors only); select
+  one to see its response and request with headers, JSON formatted. *WebSocket*: pick a socket
+  and a topic (STOMP destination, ids folded) and the direction; select a message to see its
+  body and headers. The app reads bodies only while capturing is on and a dashboard is open;
+  they stay in that page and are never part of recordings or exports. Authorization / Cookie
+  headers, the STOMP CONNECT credentials and password fields of request bodies are masked.
+  Reading bodies costs JS time, so turn it off before measuring.
 - **Redux:**
   - *dispatches/s* and how many of them **changed nothing**. Those still run every useSelector.
   - *State slices*: which parts of the state change and how many components render in the commit

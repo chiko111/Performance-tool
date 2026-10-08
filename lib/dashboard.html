@@ -80,6 +80,14 @@
   .help { margin-top: 12px; } .help summary { cursor: pointer; font-weight: 600; } .help li { margin: 4px 0; }
   .steps { margin: 12px 0; padding-left: 20px; } .steps li { margin: 4px 0; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 12px 0; }
+  .inspect-list { max-height: 320px; }
+  .inspect-list tr.pick { cursor: pointer; }
+  .inspect-list tr.pick:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .inspect-list tr[aria-selected="true"] td { background: color-mix(in srgb, var(--accent) 18%, var(--panel)); }
+  .detail h3 { font-size: 12px; margin: 10px 0 4px; display: flex; gap: 8px; align-items: center; }
+  .detail h3 .muted { font-weight: 400; }
+  .detail summary { cursor: pointer; color: var(--muted); margin-top: 6px; }
+  pre.body { margin: 0; max-height: 480px; overflow: auto; padding: 8px; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
   @media (max-width: 1100px) { .grid { grid-template-columns: 1fr; } .grid.charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 620px) { .grid.charts { grid-template-columns: 1fr; } }
   @media (max-width: 520px) { header h1 { width: 100%; } }
@@ -114,6 +122,8 @@
   <button role="tab" aria-selected="true" data-tab="live">Live</button>
   <button role="tab" aria-selected="false" data-tab="recordings">Recordings &amp; compare</button>
   <button role="tab" aria-selected="false" data-tab="auto">Auto before / after</button>
+  <button role="tab" aria-selected="false" data-tab="inspector">Inspector</button>
+  <button role="tab" aria-selected="false" data-tab="crashes">Crashes</button>
 </nav>
 
 <main>
@@ -238,11 +248,57 @@
     </div>
     <div id="autoReport"></div>
   </section>
+
+  <section class="tab" id="tab-crashes">
+    <div class="row">
+      <label class="status" for="crashDevice">Device</label>
+      <select id="crashDevice"><option value="">all</option></select>
+      <label class="status"><input type="checkbox" id="crashFatalOnly" /> only when the app ended</label>
+      <span class="spacer"></span>
+      <span class="status" id="crashCount"></span>
+    </div>
+    <p class="muted">Every crash, ANR, kill for memory and system report of the app, per device, newest first. Kept for 30 days (up to 500), also after the server restarts; Dismiss on the Live tab only hides them there.</p>
+    <div id="crashHistory"></div>
+  </section>
+
+  <section class="tab" id="tab-inspector">
+    <div class="row">
+      <button class="primary" id="inspectToggle" aria-pressed="false">● Capture bodies</button>
+      <span class="status" id="inspectStatus" role="status" aria-live="polite"></span>
+      <span class="spacer"></span>
+      <button id="inspectPause" aria-pressed="false">Pause</button>
+      <button id="inspectClear">Clear</button>
+    </div>
+    <p class="muted">Bodies of the selected device's requests and socket messages, for debugging. The app reads them only while capturing is on and a dashboard is open; they stay in this page and are not saved in recordings or exports. Authorization / Cookie headers, the STOMP CONNECT frame and password fields are masked. Reading bodies costs JS time: turn it off before measuring. Needs a probe build from this perf-tool version.</p>
+    <div class="grid">
+      <div class="panel">
+        <h2>REST <span class="hint" id="httpCount"></span></h2>
+        <div class="row">
+          <input id="httpFilter" type="search" placeholder="Filter: URL, method, status" aria-label="Filter requests" size="26" />
+          <label class="status"><input type="checkbox" id="httpErrorsOnly" /> errors only</label>
+        </div>
+        <div class="table-wrap inspect-list" id="httpList"></div>
+        <div class="detail" id="httpDetail"></div>
+      </div>
+      <div class="panel">
+        <h2>WebSocket <span class="hint" id="wsCount"></span></h2>
+        <div class="row">
+          <label class="status" for="wsSocket">Socket</label><select id="wsSocket"></select>
+          <label class="status" for="wsTopic">Topic</label><select id="wsTopic"></select>
+          <label class="status" for="wsDirection">Direction</label>
+          <select id="wsDirection"><option value="">both</option><option value="in">received</option><option value="out">sent</option></select>
+          <input id="wsFilter" type="search" placeholder="Search in body" aria-label="Search messages" size="16" />
+        </div>
+        <div class="table-wrap inspect-list" id="wsList"></div>
+        <div class="detail" id="wsDetail"></div>
+      </div>
+    </div>
+  </section>
 </main>
 
 <script>
 const HISTORY = 120;
-const state = { js: [], native: [], crashes: [], recording: null, recordingSince: 0, sources: new Map(), source: '', sourcePinned: false };
+const state = { js: [], native: [], crashes: [], recording: null, recordingSince: 0, sources: new Map(), labels: new Map(), source: '', sourcePinned: false };
 const $ = id => document.getElementById(id);
 const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const palette = () => ['--s1', '--s2', '--s3', '--s4', '--s5', '--s6'].map(css);
@@ -263,12 +319,19 @@ function trackSource(event) {
 
 const SOURCE_IDLE_MS = 10000;
 const isIdle = seen => seen != null && Date.now() - seen > SOURCE_IDLE_MS;
-const sourceLabel = (source, seen) => `${source}${isIdle(seen) ? ' (idle)' : ''}`;
+// The name the device's probe reported (iPhone 15 Pro · Wi-Fi); two of the same model keep their address.
+function displayName(source) {
+  const label = state.labels.get(source);
+  if (!label) return source;
+  const twins = [...state.sources.keys()].some(other => other !== source && state.labels.get(other) === label);
+  return twins ? `${label} (${source.split(' · ').pop()})` : label;
+}
+const sourceLabel = (source, seen) => `${displayName(source)}${isIdle(seen) ? ' (idle)' : ''}`;
 
 function renderSources() {
   $('source').innerHTML = [...state.sources.entries()]
     .sort((a, b) => b[1] - a[1])
-    .map(([source, seen]) => `<option value="${escapeHtml(source)}">${escapeHtml(sourceLabel(source, seen))}</option>`)
+    .map(([source, seen]) => `<option value="${escapeHtml(source)}" title="${escapeHtml(source)}">${escapeHtml(sourceLabel(source, seen))}</option>`)
     .join('');
   $('source').value = state.source;
   renderOpenScreens();
@@ -286,6 +349,7 @@ $('source').onchange = () => {
   state.source = $('source').value;
   state.sourcePinned = true;
   scheduleRender();
+  scheduleInspectRender();
 };
 
 // Navigation paths each app has reported, by screen, so it can be sent back to any of them.
@@ -320,7 +384,10 @@ function addEvent(event) {
   trackRoute(event);
   if (event.type === 'js') { state.js.push(event); if (state.js.length > 600) state.js.shift(); }
   if (event.type === 'native') { state.native.push(event); if (state.native.length > 600) state.native.shift(); }
-  if (event.type === 'crash' && !state.crashes.some(crash => crash.id === event.id)) state.crashes.push(event);
+  if (event.type === 'crash' && !state.crashes.some(crash => crash.id === event.id)) {
+    state.crashes.push(event);
+    renderCrashHistory();
+  }
 }
 
 // Why the app ended (crash, ANR, killed for memory…) or what iOS reported about it.
@@ -328,7 +395,7 @@ function crashList(crashes) {
   return crashes.slice().reverse().map(crash => `
     <div class="crash${crash.fatal === false ? ' reported' : ''}">
       <h3>${escapeHtml(crash.reason)}${crash.fatal === false ? ' <span class="muted">(reported, app kept running)</span>' : ''}</h3>
-      <div><span class="when">${new Date(crash.receivedAt).toLocaleString()}</span>${crash.source ? ` · ${escapeHtml(crash.source)}` : ''}${crash.screen ? ` · on <b>${escapeHtml(crash.screen)}</b>` : ''}${crash.memoryMb != null ? ` · ${escapeHtml(crash.memoryMb)} MB` : ''}${crash.signal || crash.thread ? ` · ${escapeHtml([crash.signal, crash.thread].filter(Boolean).join(' on '))}` : ''}</div>
+      <div><span class="when">${new Date(crash.receivedAt).toLocaleString()}</span>${crash.source ? ` · ${escapeHtml(displayName(crash.source))}` : ''}${crash.screen ? ` · on <b>${escapeHtml(crash.screen)}</b>` : ''}${crash.memoryMb != null ? ` · ${escapeHtml(crash.memoryMb)} MB` : ''}${crash.signal || crash.thread ? ` · ${escapeHtml([crash.signal, crash.thread].filter(Boolean).join(' on '))}` : ''}</div>
       ${crash.title ? `<div>${escapeHtml(crash.title)}</div>` : ''}
       ${crash.detail ? `<div class="muted">${escapeHtml(crash.detail)}</div>` : ''}
       ${crash.frames?.length ? `<details><summary class="muted">Stack (${crash.frames.length} frames)</summary><pre>${escapeHtml(crash.frames.join('\n'))}</pre></details>` : ''}
@@ -339,7 +406,7 @@ function crashList(crashes) {
 // Every crash not dismissed yet, from any device: a crash must not hide because another device
 // is selected or the device came back with a new address.
 function renderCrashes() {
-  const crashes = state.crashes;
+  const crashes = state.crashes.filter(crash => !crash.dismissed);
   const panel = $('crashPanel');
   panel.hidden = !crashes.length;
   if (!crashes.length) return;
@@ -347,7 +414,7 @@ function renderCrashes() {
   panel.innerHTML = `<h2>${fatal ? `The app ended ${fatal}×` : 'Reports from the system'} <span class="hint">kept until dismissed and in the recording · newest first</span><span class="spacer"></span><button id="dismissCrashes" title="Hides these reports on every open dashboard; recordings keep them">Dismiss</button></h2>${crashList(crashes)}`;
   $('dismissCrashes').onclick = () => {
     const ids = crashes.map(crash => crash.id).filter(Boolean);
-    state.crashes = state.crashes.filter(crash => !ids.includes(crash.id));
+    markDismissed(ids);
     renderCrashes();
     fetch('/crashes/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }) });
   };
@@ -383,13 +450,28 @@ source.onmessage = message => {
     renderAuto(event.auto);
     return;
   } else if (event.type === 'crashes-dismissed') {
-    state.crashes = state.crashes.filter(crash => !event.ids.includes(crash.id));
+    markDismissed(event.ids);
   } else if (event.type === 'build') {
     renderBuild(event.build);
     return;
+  } else if (event.type === 'inspect') {
+    addInspected(event);
+    return;
+  } else if (event.type === 'source-label') {
+    state.labels.set(event.source, event.label);
+    renderSources();
+    renderCrashes();
+    renderCrashHistory();
+    return;
+  } else if (event.type === 'inspect-state') {
+    setInspectorOn(event.on);
+    return;
   } else if (event.type === 'hello') {
     renderBuild(event.build);
+    setInspectorOn(event.inspecting === true);
+    state.labels = new Map(Object.entries(event.labels ?? {}));
     state.crashes = (event.crashes ?? []).slice();
+    renderCrashHistory();
     event.history.filter(item => item.type !== 'crash').forEach(addEvent);
     setRecording(event.recording);
   } else {
@@ -768,6 +850,8 @@ function selectTab(name) {
   document.querySelectorAll('nav button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.id === `tab-${name}`));
   if (name === 'live') scheduleRender();
+  if (name === 'inspector') scheduleInspectRender();
+  if (name === 'crashes') renderCrashHistory();
 }
 document.querySelectorAll('nav button').forEach(b => (b.onclick = () => selectTab(b.dataset.tab)));
 
@@ -1066,6 +1150,256 @@ $('autoCompare').onclick = () => showAutoComparison(false);
 $('copyAuto').onclick = () => copyText(autoUrl());
 $('downloadAuto').onclick = () => download(autoUrl());
 setInterval(() => autoUi.state?.phase === 'idle' && fetch('/auto').then(r => r.json()).then(state => { autoUi.state = { ...autoUi.state, current: state.current }; updateAutoButtons(); }), 2000);
+
+// ---------- Crashes ----------
+function markDismissed(ids) {
+  for (const crash of state.crashes) if (ids.includes(crash.id)) crash.dismissed = true;
+  renderCrashHistory();
+}
+
+// The name it had when it crashed; older crashes (or an unnamed probe) fall back to the address.
+const crashDevice = crash => crash.device || displayName(crash.source || crash.platform || 'unknown');
+
+const CRASH_COLUMNS = [
+  { label: 'Date', key: 'receivedAt', render: r => escapeHtml(new Date(r.receivedAt).toLocaleString()) },
+  { label: 'What', key: 'reason', render: r => (r.fatal === false ? `<span class="muted">${escapeHtml(r.reason)} (app kept running)</span>` : `<span class="up">${escapeHtml(r.reason)}</span>`) },
+  { label: 'Screen', key: 'screen', render: r => escapeHtml(r.screen ?? '–') },
+  { label: 'Title', key: 'title', cls: 'file', render: r => escapeHtml(r.title ?? '–') },
+  { label: 'MB', key: 'memoryMb', num: true, render: r => (r.memoryMb != null ? escapeHtml(r.memoryMb) : '–') },
+  { label: 'Thread', key: 'thread', cls: 'file', render: r => escapeHtml([r.signal, r.thread].filter(Boolean).join(' on ') || '–') },
+  { label: 'Details', key: 'detail', render: r => (r.detail || r.frames?.length || r.file
+      ? `<details><summary class="muted">${r.frames?.length ? `stack (${r.frames.length})` : 'more'}</summary><pre class="body">${escapeHtml([r.detail, r.file, ...(r.frames ?? [])].filter(Boolean).join('\n'))}</pre></details>`
+      : '<span class="muted">–</span>') }
+];
+
+function renderCrashHistory() {
+  if (!$('tab-crashes').classList.contains('active')) return;
+  const byDevice = new Map();
+  for (const crash of state.crashes) {
+    const device = crashDevice(crash);
+    if (!byDevice.has(device)) byDevice.set(device, []);
+    byDevice.get(device).push(crash);
+  }
+  // The device that crashed most recently first.
+  const latest = device => Math.max(...byDevice.get(device).map(crash => crash.receivedAt));
+  const devices = [...byDevice.keys()].sort((a, b) => latest(b) - latest(a));
+  const select = $('crashDevice');
+  const keep = select.value;
+  select.innerHTML = `<option value="">all</option>${devices.map(device => `<option value="${escapeHtml(device)}">${escapeHtml(device)} (${byDevice.get(device).length})</option>`).join('')}`;
+  select.value = devices.includes(keep) ? keep : '';
+  const fatalOnly = $('crashFatalOnly').checked;
+  let total = 0;
+  const panels = devices
+    .filter(device => !select.value || device === select.value)
+    .map(device => {
+      const rows = byDevice.get(device).filter(crash => !fatalOnly || crash.fatal !== false).sort((a, b) => b.receivedAt - a.receivedAt);
+      if (!rows.length) return '';
+      total += rows.length;
+      const ended = rows.filter(crash => crash.fatal !== false).length;
+      return `<div class="panel" style="margin-bottom:12px"><h2>${escapeHtml(device)} <span class="hint">${ended} times the app ended · ${rows.length - ended} reports · last ${escapeHtml(new Date(rows[0].receivedAt).toLocaleString())}</span></h2><div class="table-wrap">${table(CRASH_COLUMNS, rows, '')}</div></div>`;
+    })
+    .join('');
+  $('crashCount').textContent = `${total} in the last 30 days`;
+  $('crashHistory').innerHTML = panels || '<div class="empty">No crashes recorded. 👍</div>';
+}
+$('crashDevice').onchange = renderCrashHistory;
+$('crashFatalOnly').onchange = renderCrashHistory;
+
+// ---------- Inspector ----------
+const INSPECT_KEEP = { http: 1000, ws: 3000 };
+const INSPECT_SHOWN = 300;
+const inspector = { on: false, paused: false, unseen: 0, dropped: 0, http: [], ws: [], selected: { http: null, ws: null }, shown: { http: null, ws: null } };
+
+function setInspectorOn(on) {
+  inspector.on = on;
+  $('inspectToggle').textContent = on ? '■ Stop capturing' : '● Capture bodies';
+  $('inspectToggle').className = on ? 'danger' : 'primary';
+  $('inspectToggle').setAttribute('aria-pressed', String(on));
+  renderInspectStatus();
+}
+function renderInspectStatus() {
+  $('inspectStatus').textContent = inspector.on
+    ? `Capturing${inspector.dropped ? ` · ${inspector.dropped} dropped (more than the app sends per second)` : ''}`
+    : 'Off: the app keeps no bodies';
+}
+$('inspectToggle').onclick = async () => {
+  const result = await post('/inspect', { on: !inspector.on });
+  if (result) setInspectorOn(result.on);
+};
+
+function addInspected(event) {
+  if (event.dropped) { inspector.dropped += event.dropped; renderInspectStatus(); }
+  for (const entry of event.entries) (entry.kind === 'http' ? inspector.http : inspector.ws).push({ ...entry, source: event.source });
+  for (const kind of ['http', 'ws']) {
+    const list = inspector[kind];
+    if (list.length > INSPECT_KEEP[kind]) list.splice(0, list.length - INSPECT_KEEP[kind]);
+  }
+  if (inspector.paused) {
+    inspector.unseen += event.entries.length;
+    $('inspectPause').textContent = `Resume (${inspector.unseen} new)`;
+    return;
+  }
+  scheduleInspectRender();
+}
+
+$('inspectPause').onclick = () => {
+  inspector.paused = !inspector.paused;
+  inspector.unseen = 0;
+  $('inspectPause').textContent = inspector.paused ? 'Resume' : 'Pause';
+  $('inspectPause').setAttribute('aria-pressed', String(inspector.paused));
+  if (!inspector.paused) scheduleInspectRender();
+};
+$('inspectClear').onclick = () => {
+  Object.assign(inspector, { http: [], ws: [], dropped: 0, selected: { http: null, ws: null }, shown: { http: null, ws: null } });
+  renderInspectStatus();
+  renderInspector();
+};
+
+let inspectQueued = false;
+function scheduleInspectRender() {
+  if (inspectQueued || !$('tab-inspector').classList.contains('active')) return;
+  inspectQueued = true;
+  requestAnimationFrame(() => { inspectQueued = false; renderInspector(); });
+}
+
+const ofSource = entry => !state.source || entry.source === state.source;
+const clockTime = at => `${new Date(at).toLocaleTimeString([], { hour12: false })}.${String(at % 1000).padStart(3, '0')}`;
+const sizeText = chars => (chars == null ? '–' : chars < 1024 ? `${chars} B` : `${fmt(chars / 1024, 1)} KB`);
+const isHttpError = entry => !entry.status || entry.status >= 400;
+const pathOf = url => String(url).replace(/^[a-z]+:\/\/[^/]+/i, '') || url;
+const prettyBody = text => { try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; } };
+
+function visibleHttp() {
+  const query = $('httpFilter').value.trim().toLowerCase();
+  const errorsOnly = $('httpErrorsOnly').checked;
+  return inspector.http.filter(entry => ofSource(entry)
+    && (!errorsOnly || isHttpError(entry))
+    && (!query || `${entry.method} ${entry.status} ${entry.url}`.toLowerCase().includes(query)));
+}
+
+function visibleWs() {
+  const socket = $('wsSocket').value, topic = $('wsTopic').value, direction = $('wsDirection').value;
+  const query = $('wsFilter').value.trim().toLowerCase();
+  return inspector.ws.filter(entry => ofSource(entry)
+    && (!socket || entry.socket === socket) && (!topic || entry.topic === topic)
+    && (!direction || entry.direction === direction)
+    && (!query || `${entry.destination ?? ''} ${entry.body ?? ''}`.toLowerCase().includes(query)));
+}
+
+// Options are rebuilt only when the list changes, so an open dropdown is not replaced under the pointer.
+function setOptions(select, options, allLabel) {
+  const html = `<option value="">${allLabel}</option>${options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join('')}`;
+  if (select.dataset.html === html) return;
+  const keep = select.value;
+  select.innerHTML = html;
+  select.dataset.html = html;
+  select.value = options.some(([value]) => value === keep) ? keep : '';
+}
+
+function renderWsSelectors() {
+  const entries = inspector.ws.filter(ofSource);
+  setOptions($('wsSocket'), [...new Set(entries.map(entry => entry.socket))].sort().map(socket => [socket, socket]), 'all');
+  const counts = new Map();
+  for (const entry of entries) if (!$('wsSocket').value || entry.socket === $('wsSocket').value) counts.set(entry.topic, (counts.get(entry.topic) ?? 0) + 1);
+  setOptions($('wsTopic'), [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([topic, count]) => [topic, `${topic} (${count})`]), 'all');
+}
+
+function pickTable(kind, columns, rows, emptyText) {
+  if (!rows.length) return `<div class="empty">${emptyText}</div>`;
+  return `<table><thead><tr>${columns.map(c => `<th class="${c.num ? 'num' : ''}">${c.label}</th>`).join('')}</tr></thead><tbody>${
+    rows.map(row => `<tr class="pick" tabindex="0" data-id="${escapeHtml(row.id)}" aria-selected="${row.id === inspector.selected[kind]}">${
+      columns.map(c => `<td class="${c.num ? 'num' : ''} ${c.cls ?? ''}" title="${escapeHtml(c.title ? c.title(row) : '')}">${c.render(row)}</td>`).join('')
+    }</tr>`).join('')
+  }</tbody></table>`;
+}
+
+const HTTP_COLUMNS = [
+  { label: 'Time', render: r => clockTime(r.at) },
+  { label: 'Method', render: r => escapeHtml(r.method) },
+  { label: 'Status', num: true, render: r => (isHttpError(r) ? `<span class="up">${r.status || 'failed'}</span>` : r.status) },
+  { label: 'ms', num: true, render: r => r.ms },
+  { label: 'Size', num: true, render: r => sizeText(r.responseTruncated || r.responseBody?.length) },
+  { label: 'URL', cls: 'file', title: r => r.url, render: r => escapeHtml(pathOf(r.url)) }
+];
+const WS_COLUMNS = [
+  { label: 'Time', render: r => clockTime(r.at) },
+  { label: '', title: r => (r.direction === 'in' ? 'received' : 'sent'), render: r => (r.direction === 'in' ? '↓' : '<span class="muted">↑</span>') },
+  { label: 'Command', render: r => (r.command === 'ERROR' ? '<span class="up">ERROR</span>' : escapeHtml(r.command ?? '–')) },
+  { label: 'Destination', cls: 'file', title: r => r.destination ?? r.topic, render: r => escapeHtml(r.destination ?? r.topic) },
+  { label: 'Size', num: true, render: r => sizeText(r.truncated || r.bytes) },
+  { label: 'Body', cls: 'file', render: r => escapeHtml((r.body ?? '').replace(/\s+/g, ' ').slice(0, 80)) }
+];
+
+function headerBlock(headers) {
+  const entries = Object.entries(headers ?? {});
+  if (!entries.length) return '';
+  return `<details><summary>Headers (${entries.length})</summary><pre class="body">${escapeHtml(entries.map(([name, value]) => `${name}: ${value}`).join('\n'))}</pre></details>`;
+}
+
+function bodyBlock(title, text, truncated) {
+  if (text == null || text === '') return `<h3>${title} <span class="muted">empty</span></h3>`;
+  const cut = truncated ? ` · first ${sizeText(text.length)} of ${sizeText(truncated)}` : '';
+  return `<h3>${title} <span class="muted">${sizeText(text.length)}${cut}</span><button data-copy>Copy</button></h3><pre class="body">${escapeHtml(prettyBody(text))}</pre>`;
+}
+
+function renderDetail(kind) {
+  const id = inspector.selected[kind];
+  if (inspector.shown[kind] === id) return;
+  inspector.shown[kind] = id;
+  const entry = id && inspector[kind].find(item => item.id === id);
+  const target = $(`${kind}Detail`);
+  if (!entry) { target.innerHTML = ''; return; }
+  target.innerHTML = kind === 'http'
+    ? `<h3>${escapeHtml(entry.method)} ${isHttpError(entry) ? `<span class="up">${entry.status || 'failed'}</span>` : entry.status} <span class="muted">${entry.ms} ms · ${clockTime(entry.at)}</span></h3>
+       <pre class="body">${escapeHtml(entry.url)}</pre>
+       ${bodyBlock('Response', entry.responseBody, entry.responseTruncated)}${headerBlock(entry.responseHeaders)}
+       ${bodyBlock('Request', entry.requestBody, entry.requestTruncated)}${headerBlock(entry.requestHeaders)}`
+    : `<h3>${entry.direction === 'in' ? 'Received' : 'Sent'} ${escapeHtml(entry.command ?? '')} <span class="muted">${clockTime(entry.at)} · ${escapeHtml(entry.socket)}</span></h3>
+       <pre class="body">${escapeHtml(entry.destination ?? entry.topic)}</pre>
+       ${bodyBlock('Body', entry.body, entry.truncated)}${headerBlock(entry.headers)}`;
+}
+
+function renderList(kind, columns, rows, total, emptyText) {
+  const list = $(`${kind}List`);
+  const focusedId = list.contains(document.activeElement) ? document.activeElement.dataset.id : null;
+  list.innerHTML = pickTable(kind, columns, rows.slice(-INSPECT_SHOWN).reverse(), emptyText);
+  $(`${kind}Count`).textContent = rows.length === total ? `${total} newest first` : `${rows.length} of ${total} · newest first`;
+  if (focusedId) list.querySelector(`tr[data-id="${CSS.escape(focusedId)}"]`)?.focus();
+  renderDetail(kind);
+}
+
+function renderInspector() {
+  const waiting = inspector.on ? 'Nothing yet. Use the app.' : 'Press ● Capture bodies, then use the app.';
+  renderList('http', HTTP_COLUMNS, visibleHttp(), inspector.http.filter(ofSource).length, waiting);
+  renderWsSelectors();
+  renderList('ws', WS_COLUMNS, visibleWs(), inspector.ws.filter(ofSource).length, waiting);
+}
+
+for (const kind of ['http', 'ws']) {
+  const list = $(`${kind}List`);
+  const select = row => {
+    inspector.selected[kind] = row.dataset.id;
+    list.querySelectorAll('tr[aria-selected="true"]').forEach(other => other.setAttribute('aria-selected', 'false'));
+    row.setAttribute('aria-selected', 'true');
+    renderDetail(kind);
+  };
+  list.onclick = event => { const row = event.target.closest('tr.pick'); if (row) select(row); };
+  list.onkeydown = event => {
+    const row = event.target.closest('tr.pick');
+    if (!row) return;
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(row); }
+    const next = event.key === 'ArrowDown' ? row.nextElementSibling : event.key === 'ArrowUp' ? row.previousElementSibling : null;
+    if (next) { event.preventDefault(); next.focus(); select(next); }
+  };
+  $(`${kind}Detail`).onclick = async event => {
+    if (!event.target.matches('[data-copy]')) return;
+    await navigator.clipboard.writeText(event.target.closest('h3').nextElementSibling.textContent);
+    toast('Copied');
+  };
+}
+for (const id of ['httpFilter', 'wsFilter']) $(id).oninput = renderInspector;
+for (const id of ['httpErrorsOnly', 'wsSocket', 'wsTopic', 'wsDirection']) $(id).onchange = renderInspector;
+setInspectorOn(false);
 
 fetch('/auto').then(response => response.json()).then(state => { renderAuto(state); loadScenarios(); });
 loadRecordings();
