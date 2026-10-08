@@ -358,10 +358,11 @@
       <span class="spacer"></span>
       <input id="healthFilter" type="search" placeholder="Filter: file, rule, component" aria-label="Filter findings" size="24" />
       <label class="status" for="healthSeverity">Severity</label>
-      <select id="healthSeverity"><option value="">all</option><option value="high">high</option><option value="medium">medium and high</option></select>
+      <select id="healthSeverity"><option value="medium" selected>high and medium</option><option value="high">high</option><option value="">all (with low)</option></select>
       <button id="copyHealth">Copy as text</button>
       <button id="downloadHealth">Download .md</button>
     </div>
+    <div class="panel" id="measuredPanel" hidden><h2>Measured in the app <span class="hint" id="measuredHint">last 2 minutes of the selected device · problems that really happened outrank possible ones</span></h2><div id="measuredBody"></div></div>
     <div id="healthReport"><div class="empty">No report yet: press Run check.</div></div>
   </section>
 </main>
@@ -958,7 +959,7 @@ function selectTab(name) {
   if (name === 'inspector') scheduleInspectRender();
   if (name === 'crashes') renderCrashHistory();
   if (name === 'leaks') loadLeaks();
-  if (name === 'health' && !healthUi.loaded) loadHealth();
+  if (name === 'health') { if (!healthUi.loaded) loadHealth(); loadMeasured(); }
 }
 document.querySelectorAll('nav button').forEach(b => (b.onclick = () => selectTab(b.dataset.tab)));
 
@@ -1883,8 +1884,26 @@ function renderHealthState(health) {
 }
 
 $('healthRun').onclick = () => post('/health/run');
-$('copyHealth').onclick = () => copyText('/export/health');
-$('downloadHealth').onclick = () => download('/export/health');
+const healthExportUrl = () => (state.source ? `/export/health?source=${encodeURIComponent(state.source)}` : '/export/health');
+$('copyHealth').onclick = () => copyText(healthExportUrl());
+$('downloadHealth').onclick = () => download(healthExportUrl());
+
+async function loadMeasured() {
+  const response = await fetch(state.source ? `/health/measured?source=${encodeURIComponent(state.source)}` : '/health/measured');
+  if (!response.ok) return;
+  const data = await response.json();
+  const rows = [
+    ...(data.forcedLayouts ?? []).map(row => ({ kind: 'Forced layout', where: row.location ?? row.fn ?? '–', what: `${fmt(row.msPerSec, 1)} ms/s · ${row.count}× · up to ${fmt(row.maxMs)} ms${row.component ? ` · ${row.component}` : ''}` })),
+    ...(data.leaks ?? []).map(row => ({ kind: 'Leak', where: row.location ?? row.fn ?? '–', what: `${row.component ?? '?'} left ${row.live} ${row.kind} (${row.detail})` })),
+    ...(data.components ?? []).map(row => ({ kind: 'Slow render', where: row.file, what: `${row.component} ${fmt(row.msPerSec, 1)} ms/s on ${row.screen}` })),
+    ...(data.interactions ?? []).map(row => ({ kind: 'Slow interaction', where: row.target ?? '–', what: `${row.type} ${row.ms} ms` })),
+    ...(data.slowFrames ?? []).map(row => ({ kind: 'Slow frames', where: row.location ?? row.invoker ?? '–', what: `${fmt(row.ms)} ms in ${row.count} frames` })),
+    ...(data.screens ?? []).map(row => ({ kind: 'Long tasks', where: row.screen, what: `${row.longTasks} · longest ${fmt(row.maxBlockMs)} ms` }))
+  ];
+  $('measuredPanel').hidden = !data.source;
+  $('measuredBody').innerHTML = table([{ label: 'What', key: 'kind' }, { label: 'Where', key: 'where', cls: 'file' }, { label: 'Measured', key: 'what', cls: 'wrap' }], rows, 'Nothing over the thresholds in the last 2 minutes. 👍');
+}
+setInterval(() => { if ($('tab-health').classList.contains('active')) loadMeasured(); }, 5000);
 $('healthFilter').oninput = () => renderHealth();
 $('healthSeverity').onchange = () => renderHealth();
 
@@ -1944,12 +1963,16 @@ function renderHealth() {
       { label: 'Deprecated', key: 'deprecated', cls: 'wrap', render: r => (r.deprecated ? `<span class="up">${escapeHtml(r.deprecated)}</span>` : '') },
       { label: 'Type', key: 'type', cls: 'file' }
     ], deps.outdated, 'Everything is current. 👍')}</div></div>`);
-    panels.push(`<div class="panel"><h2>Vulnerabilities <span class="hint">${deps.vulnerabilities.length}</span></h2><div class="table-wrap">${table([
+    const inApp = deps.vulnerabilities.filter(item => item.shipped === true).length;
+    const toolsOnly = deps.vulnerabilities.filter(item => item.shipped === false).length;
+    const showTools = $('healthSeverity').value === '';
+    panels.push(`<div class="panel"><h2>Vulnerabilities <span class="hint">${inApp || toolsOnly ? `${inApp} in the app · ${toolsOnly} only in build / test tools${showTools ? '' : ' (shown with “all”)'}` : deps.vulnerabilities.length}</span></h2><div class="table-wrap">${table([
       { label: 'Severity', key: 'severity', render: r => `<span class="badge ${escapeHtml(r.severity)}">${escapeHtml(r.severity)}</span>` },
+      { label: 'In the app', key: 'shipped', render: r => (r.shipped === true ? '<span class="up">yes</span>' : r.shipped === false ? '<span class="muted">tools only</span>' : '?') },
       { label: 'Package', key: 'name', render: r => escapeHtml(`${r.name}@${r.version}`) },
       { label: 'Problem', key: 'title', cls: 'wrap', render: r => (r.url ? `<a href="${escapeHtml(r.url)}" target="_blank" rel="noopener">${escapeHtml(r.title)}</a>` : escapeHtml(r.title)) },
       { label: 'Affected', key: 'vulnerableVersions', cls: 'file' }, { label: 'Through', key: 'dependencyOf', render: r => escapeHtml(r.dependencyOf ?? '–') }
-    ], deps.vulnerabilities, 'No known vulnerabilities. 👍')}</div></div>`);
+    ], deps.vulnerabilities.filter(item => showTools || item.shipped !== false), 'No known vulnerabilities in the app. 👍')}</div></div>`);
     panels.push(`<div class="panel"><h2>Duplicated &amp; heavy packages</h2><div class="table-wrap">${table([
       { label: 'Package', key: 'name' }, { label: 'Versions', key: 'versions', cls: 'wrap', render: r => escapeHtml(r.versions.map(v => `${v.version}${v.kb != null ? ` (${fmt(v.kb)} KB)` : ''}`).join(', ')) }
     ], deps.duplicates, 'No package is bundled twice. 👍')}</div><div class="table-wrap">${table([

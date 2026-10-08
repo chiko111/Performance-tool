@@ -33,6 +33,7 @@ function emptyCounts() {
 
 function createLeakTracker(options) {
   var ownComponents = (options && options.ownComponents) || new Set();
+  var normalizeName = (options && options.normalizeName) || function (name) { return name; };
   var now = (options && options.now) || Date.now;
   var hasWeakRef = typeof WeakRef === 'function';
 
@@ -729,7 +730,7 @@ function createLeakTracker(options) {
       nextInstanceId += 1;
       instanceIds.set(fiber, id);
       if (fiber.alternate) instanceIds.set(fiber.alternate, id);
-      var name = componentName(fiber) || 'Anonymous';
+      var name = normalizeName(componentName(fiber) || 'Anonymous');
       owners.set(id, { id: id, name: name, own: ownComponents.has(name) });
     } else if (!instanceIds.has(fiber)) {
       instanceIds.set(fiber, id);

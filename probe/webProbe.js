@@ -29,7 +29,7 @@ var started = false;
 var sessionId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 var current = createWindow();
 var pending = [];
-var tracker = createLeakTracker({ ownComponents: ownComponents });
+var tracker = createLeakTracker({ ownComponents: ownComponents, normalizeName: function (name) { return ownName(name); } });
 var useEffectWrapping = false;
 
 // The probe's own timers and listeners use the originals, captured before the tracker wraps them, so
@@ -990,14 +990,23 @@ var REACT_FIBER_NAMES = {
   31: 'Activity'
 };
 
+// webpack's scope hoisting can rename a component to "Module_Component" (builds made before perf-tool
+// turned it off, or bundlers that do the same): the part after the last "_" is ours when it is a known name.
+function ownName(name) {
+  if (!name || ownComponents.has(name)) return name;
+  var cut = name.lastIndexOf('_');
+  if (cut > 0 && cut < name.length - 1 && ownComponents.has(name.slice(cut + 1))) return name.slice(cut + 1);
+  return name;
+}
+
 function componentName(fiber) {
   var type = fiber.type;
   if (!type) return null;
-  if (typeof type === 'function') return type.displayName || type.name || 'Anonymous';
+  if (typeof type === 'function') return ownName(type.displayName || type.name || 'Anonymous');
   if (typeof type === 'object') {
-    if (type.displayName) return type.displayName;
+    if (type.displayName) return ownName(type.displayName);
     var inner = type.render || type.type;
-    if (inner) return inner.displayName || inner.name || 'Anonymous';
+    if (inner) return ownName(inner.displayName || inner.name || 'Anonymous');
   }
   return null;
 }
@@ -1068,7 +1077,8 @@ function onCommit(root) {
   } catch (error) {
     current.probeErrors = (current.probeErrors || 0) + 1;
   }
-  var fallbackScreen = foldPath(locationPath());
+  // Components outside any route (header, sidebars, betslip) belong to the screen in front.
+  var fallbackScreen = currentScreen();
   var deepestRoute = null;
 
   var commitComponents = new Map();
